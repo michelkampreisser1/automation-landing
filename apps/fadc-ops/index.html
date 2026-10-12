@@ -1,0 +1,615 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>FADC Ops</title>
+<meta name="robots" content="noindex,nofollow">
+<meta name="theme-color" content="#1e3a5f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="FADC Ops">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<link rel="icon" type="image/png" href="/icon-192.png">
+<style>body{margin:0;padding:0;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}[hidden]:not([hidden=until-found i]){display:none!important}</style>
+</head><body>
+
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+  /* Layout: one column console — KPI strip, then tabs (Weekly · Appointments · Pipeline · Money · Metrics · Activity) */
+  :root {
+    --bg: #fafaf9; --surface: #ffffff; --surface-alt: #f5f5f4; --border: #e7e5e4;
+    --fg: #1c1917; --fg-muted: #78716c; --fg-dim: #a8a29e;
+    --accent: #1d4ed8; --accent-light: #dbeafe;
+    --green: #15803d; --green-light: #dcfce7;
+    --amber: #b45309; --amber-light: #fef3c7;
+    --red: #dc2626; --red-light: #fee2e2;
+    --purple: #7c3aed; --purple-light: #ede9fe;
+    --navy: #1e3a5f;
+  }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+    --bg: #0c0a09; --surface: #1c1917; --surface-alt: #292524; --border: #3f3b37;
+    --fg: #fafaf9; --fg-muted: #a8a29e; --fg-dim: #78716c;
+    --accent: #60a5fa; --accent-light: #1e3a5f; --green: #4ade80; --green-light: #14532d;
+    --amber: #fbbf24; --amber-light: #451a03; --red: #f87171; --red-light: #450a0a;
+    --purple: #a78bfa; --purple-light: #2e1065; --navy: #93c5fd; color-scheme: dark;
+  }}
+  :root[data-theme="dark"] {
+    --bg: #0c0a09; --surface: #1c1917; --surface-alt: #292524; --border: #3f3b37;
+    --fg: #fafaf9; --fg-muted: #a8a29e; --fg-dim: #78716c;
+    --accent: #60a5fa; --accent-light: #1e3a5f; --green: #4ade80; --green-light: #14532d;
+    --amber: #fbbf24; --amber-light: #451a03; --red: #f87171; --red-light: #450a0a;
+    --purple: #a78bfa; --purple-light: #2e1065; --navy: #93c5fd; color-scheme: dark;
+  }
+  body { background: var(--bg); color: var(--fg); font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    padding: 0 16px; padding-block: 0; max-width: 960px; margin: 0 auto; }
+  .header { display:flex; justify-content:space-between; align-items:center; padding:20px 0 12px; border-bottom:2px solid var(--border); margin-bottom:20px; flex-wrap:wrap; gap:8px; }
+  .header h1 { font-size:1.25rem; font-weight:700; letter-spacing:-0.02em; margin:0; color:var(--navy); }
+  .header .status { font-size:0.75rem; color:var(--fg-dim); display:flex; align-items:center; gap:6px; }
+  .dot { width:6px; height:6px; border-radius:50%; background:var(--green); animation:pulse 2s infinite; }
+  .dot.error { background:var(--red); animation:none; } .dot.loading { background:var(--amber); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  @media (prefers-reduced-motion: reduce) { .dot { animation:none; } }
+  .kpi-row { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; margin-bottom:24px; }
+  .kpi { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px 16px; min-width:0; }
+  .kpi .label { font-size:0.7rem; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; color:var(--fg-muted); margin-bottom:4px; }
+  .kpi .value { font-size:1.6rem; font-weight:700; font-variant-numeric:tabular-nums; line-height:1.1; }
+  .kpi .sub { font-size:0.7rem; color:var(--fg-dim); margin-top:2px; }
+  .section { margin-bottom:28px; }
+  .section-header { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:10px; flex-wrap:wrap; gap:4px; }
+  .section-header h2 { font-size:0.875rem; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; margin:0; }
+  .section-header .count { font-size:0.75rem; color:var(--fg-dim); }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+  .appt-item { padding:14px 16px; border-bottom:1px solid var(--border); display:grid; gap:6px; }
+  .appt-item:last-child, .lead-item:last-child, .msg-item:last-child { border-bottom:none; }
+  .appt-top { display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:6px; }
+  .appt-name { font-weight:600; font-size:0.9rem; }
+  .appt-badge, .stage-badge { font-size:0.65rem; font-weight:600; padding:2px 8px; border-radius:999px; text-transform:uppercase; letter-spacing:0.04em; white-space:nowrap; }
+  .badge-pending { background:var(--amber-light); color:var(--amber); }
+  .badge-confirmed { background:var(--green-light); color:var(--green); }
+  .badge-cancelled { background:var(--red-light); color:var(--red); }
+  .badge-completed { background:var(--accent-light); color:var(--accent); }
+  .appt-details { display:flex; flex-wrap:wrap; gap:4px 16px; font-size:0.78rem; color:var(--fg-muted); }
+  .appt-notes { font-size:0.75rem; color:var(--fg-dim); line-height:1.4; white-space:pre-line; max-height:60px; overflow:hidden; cursor:pointer; transition:max-height .2s; }
+  .appt-notes.expanded { max-height:600px; }
+  .lead-item { padding:12px 16px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px; }
+  .lead-info { display:flex; flex-direction:column; gap:2px; min-width:0; }
+  .lead-name { font-weight:600; font-size:0.85rem; }
+  .lead-meta { font-size:0.75rem; color:var(--fg-muted); display:flex; flex-wrap:wrap; gap:4px 12px; }
+  .lead-right { display:flex; flex-direction:column; align-items:flex-end; gap:2px; }
+  .stage-qualifying { background:var(--purple-light); color:var(--purple); }
+  .stage-ready { background:var(--green-light); color:var(--green); }
+  .time-ago, .msg-time { font-size:0.7rem; color:var(--fg-dim); font-variant-numeric:tabular-nums; }
+  .msg-item { padding:10px 16px; border-bottom:1px solid var(--border); font-size:0.8rem; line-height:1.4; }
+  .msg-header { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:3px; flex-wrap:wrap; gap:4px; }
+  .msg-who { font-weight:600; font-size:0.75rem; }
+  .msg-who.customer { color:var(--accent); } .msg-who.agent { color:var(--green); } .msg-who.human { color:var(--amber); } .msg-who.followup { color:var(--purple); }
+  .msg-text { color:var(--fg-muted); word-break:break-word; }
+  .msg-lead { font-size:0.7rem; color:var(--fg-dim); margin-top:2px; }
+  .empty { padding:24px; text-align:center; color:var(--fg-dim); font-size:0.85rem; }
+  .tabs { display:flex; border-bottom:1px solid var(--border); margin-bottom:16px; overflow-x:auto; }
+  .tab { padding:8px 16px; font-size:0.78rem; font-weight:600; color:var(--fg-muted); cursor:pointer; border:none; border-bottom:2px solid transparent; white-space:nowrap; background:none; font-family:inherit; }
+  .tab:hover { color:var(--fg); } .tab:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+  .tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+  .tab-content { display:none; } .tab-content.active { display:block; }
+  .connect-msg { text-align:center; padding:48px 24px; color:var(--fg-muted); font-size:0.9rem; line-height:1.6; }
+  .connect-msg strong { color:var(--fg); display:block; margin-bottom:8px; font-size:1rem; }
+  .tbl-wrap { overflow-x:auto; }
+  table.t { width:100%; border-collapse:collapse; font-size:0.78rem; font-variant-numeric:tabular-nums; }
+  table.t th { text-align:left; color:var(--fg-muted); font-weight:600; padding:8px 10px; border-bottom:1px solid var(--border); white-space:nowrap; }
+  table.t td { padding:8px 10px; border-top:1px solid var(--border); vertical-align:top; }
+  table.t td.num, table.t th.num { text-align:right; white-space:nowrap; }
+  table.t tr.total td { font-weight:700; border-top:2px solid var(--border); }
+  .chip { display:inline-block; font-size:0.65rem; font-weight:700; padding:1px 7px; border-radius:999px; background:var(--surface-alt); color:var(--fg-muted); letter-spacing:0.04em; }
+  .owe { display:flex; flex-direction:column; gap:0; }
+  .owe-row { display:flex; justify-content:space-between; gap:12px; padding:10px 16px; border-top:1px solid var(--border); font-size:0.82rem; font-variant-numeric:tabular-nums; }
+  .owe-row:first-child { border-top:none; }
+  .owe-row.final { font-weight:700; background:var(--surface-alt); }
+  .note { font-size:0.75rem; color:var(--fg-dim); margin-top:8px; line-height:1.5; }
+  .delta-up { color:var(--green); font-weight:600; } .delta-down { color:var(--red); font-weight:600; }
+  .two-col { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:16px; }
+  .two-col > * { min-width:0; }
+  /* Weekly tab */
+  .brief { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:16px 18px; margin-bottom:20px; }
+  .brief-top { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:8px; }
+  .brief-week { font-size:0.7rem; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; color:var(--fg-muted); }
+  .brief h3 { margin:0 0 10px; font-size:1.05rem; line-height:1.35; color:var(--navy); text-wrap:balance; }
+  .brief ul { margin:0; padding-left:18px; display:grid; gap:6px; font-size:0.82rem; line-height:1.5; color:var(--fg); max-width:70ch; }
+  .brief .by { font-size:0.7rem; color:var(--fg-dim); margin-top:10px; }
+  .verdict { font-size:0.65rem; font-weight:700; padding:2px 9px; border-radius:999px; text-transform:uppercase; letter-spacing:0.05em; }
+  .verdict.profit { background:var(--green-light); color:var(--green); }
+  .verdict.loss { background:var(--red-light); color:var(--red); }
+  .verdict.breakeven { background:var(--amber-light); color:var(--amber); }
+  .funnel { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:0; background:var(--surface); border:1px solid var(--border); border-radius:10px; overflow:hidden; margin-bottom:20px; }
+  .funnel > div { padding:12px 14px; border-left:1px solid var(--border); min-width:0; }
+  .funnel > div:first-child { border-left:none; }
+  .funnel .n { font-size:1.3rem; font-weight:700; font-variant-numeric:tabular-nums; }
+  .funnel .l { font-size:0.68rem; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; color:var(--fg-muted); }
+  .funnel .r { font-size:0.7rem; color:var(--fg-dim); margin-top:2px; }
+  .bars { display:grid; gap:8px; padding:14px 16px; }
+  .bar-row { display:grid; grid-template-columns:64px 1fr 74px; align-items:center; gap:10px; font-size:0.75rem; font-variant-numeric:tabular-nums; }
+  .bar-track { position:relative; height:14px; }
+  .bar-track::before { content:''; position:absolute; left:50%; top:-3px; bottom:-3px; width:1px; background:var(--border); }
+  .bar { position:absolute; top:0; height:100%; border-radius:3px; }
+  .bar.pos { left:50%; background:var(--green); }
+  .bar.neg { right:50%; background:var(--red); }
+  .bar-row .v { text-align:right; font-weight:600; }
+  .seg { display:inline-flex; border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+  .seg button { border:none; background:var(--surface); color:var(--fg-muted); padding:5px 12px; font:600 0.72rem inherit; font-family:inherit; cursor:pointer; }
+  .seg button.on { background:var(--accent-light); color:var(--accent); }
+  .cat { display:flex; justify-content:space-between; align-items:baseline; margin:18px 0 8px; }
+  .cat h3 { margin:0; font-size:0.8rem; text-transform:uppercase; letter-spacing:.05em; }
+  .said { font-size:0.74rem; color:var(--fg-dim); font-style:italic; overflow-wrap:anywhere; }
+  table.t tr.current td { background:var(--surface-alt); }
+
+  .gate { max-width:360px; margin:18vh auto 0; text-align:center; }
+  .gate h2 { color:var(--navy); margin:0 0 6px; }
+  .gate p { color:var(--fg-muted); font-size:.85rem; margin:0 0 16px; }
+  .gate input { width:100%; box-sizing:border-box; padding:12px; font-size:16px; border:1px solid var(--border); border-radius:10px; background:var(--surface); color:var(--fg); }
+  .gate button { margin-top:10px; width:100%; padding:12px; font-size:15px; font-weight:600; border:none; border-radius:10px; background:var(--accent); color:#fff; }
+  .gate .err { color:var(--red); font-size:.8rem; margin-top:8px; min-height:1em; }
+</style>
+
+<div class="header">
+  <h1>FADC Operations</h1>
+  <div class="status"><div class="dot loading" id="status-dot"></div><span id="last-update">Connecting…</span></div>
+</div>
+
+<div id="connect-prompt" class="connect-msg" hidden>
+  <strong>Connect Supabase to view live data</strong>
+  When prompted, allow the Supabase connector so this dashboard can read your leads, appointments, money and messages.
+</div>
+
+<div id="gate" class="gate" hidden>
+  <h2>FADC Operations</h2>
+  <p>Enter your access key (only needed once on this phone).</p>
+  <input id="gate-key" type="password" autocomplete="off" autocapitalize="off" placeholder="Access key">
+  <button id="gate-go">Open</button>
+  <div class="err" id="gate-err"></div>
+</div>
+
+<div id="main-content">
+  <div id="kpis" class="kpi-row"></div>
+  <div class="tabs" role="tablist">
+    <button class="tab active" data-tab="weekly" id="tab-weekly">Weekly</button>
+    <button class="tab" data-tab="funnel" id="tab-funnel">Booked vs not</button>
+    <button class="tab" data-tab="appointments" id="tab-appointments">Appointments</button>
+    <button class="tab" data-tab="pipeline" id="tab-pipeline">Pipeline</button>
+    <button class="tab" data-tab="money" id="tab-money">Money</button>
+    <button class="tab" data-tab="metrics" id="tab-metrics">Metrics</button>
+    <button class="tab" data-tab="activity" id="tab-activity">Activity</button>
+  </div>
+  <div id="weekly" class="tab-content active section"><div class="card"><div class="empty">Loading the weekly report…</div></div></div>
+  <div id="funnel" class="tab-content section"><div class="card"><div class="empty">Loading…</div></div></div>
+  <div id="appointments" class="tab-content section"></div>
+  <div id="pipeline" class="tab-content section"></div>
+  <div id="money" class="tab-content section"><div class="card"><div class="empty">Loading money…</div></div></div>
+  <div id="metrics" class="tab-content section"><div class="card"><div class="empty">Loading metrics…</div></div></div>
+  <div id="activity" class="tab-content section"></div>
+</div>
+
+<script>
+const PROJECT_ID = 'lvqeucpqgqcxsghqsemn';
+const dot = document.getElementById('status-dot');
+const updateEl = document.getElementById('last-update');
+const promptEl = document.getElementById('connect-prompt');
+const main = document.getElementById('main-content');
+
+// The 150 historical conversations imported on Oct 2 (19:08–03:37 UTC) are not new leads.
+const IMPORT_FROM = Date.parse('2026-10-02T19:00:00Z'), IMPORT_TO = Date.parse('2026-10-03T03:40:00Z');
+function isImported(l) { const t = Date.parse(l.created_at); return t >= IMPORT_FROM && t <= IMPORT_TO && l.stage === 'closed_lost'; }
+
+// Baseline captured Oct 6, 2026 (before bot v62–v67, comment replies and the new ad sets).
+const BASELINE = {
+  date: 'Oct 6, 2026',
+  costPerConv: 8.41, costPerClose: 263.33, sharePerDollar: 1.31, closed: 3,
+  appts7d: 6, comments7d: 0, noShows: 2
+};
+
+let leads = [], appointments = [], messages = [], jobs = [], money = null, stats = null;
+let weekly = [], briefings = [], funnel = [], funnelWeek = 0;
+let leadsReady = false;
+
+function esc(s) { if (s === null || s === undefined) return ''; const d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
+function usd(n) { return (n < 0 ? '−$' : '$') + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function usd0(n) { return (n < 0 ? '−$' : '$') + Math.abs(Math.round(n)).toLocaleString('en-US'); }
+function pct(n) { return Math.round(n * 1000) / 10 + '%'; }
+function timeAgo(d) { const m = Math.floor((Date.now() - new Date(d).getTime()) / 60000); if (m < 1) return 'just now'; if (m < 60) return m + 'm ago'; const h = Math.floor(m / 60); if (h < 24) return h + 'h ago'; return Math.floor(h / 24) + 'd ago'; }
+function fmtTime(d) { return new Date(d).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }); }
+function fmtDay(d) { return new Date(d + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); }
+function setStatus(state, text) { dot.className = 'dot ' + (state === 'ok' ? '' : state === 'error' ? 'error' : 'loading'); updateEl.textContent = text; }
+
+function extractRows(payload) {
+  if (!payload) return [];
+  if (Array.isArray(payload)) return payload;
+  if (payload.rows && Array.isArray(payload.rows)) return payload.rows;
+  if (payload.content) {
+    for (const block of (Array.isArray(payload.content) ? payload.content : [])) {
+      if (block.type === 'text' && block.text) {
+        let txt = block.text;
+        try { const p = JSON.parse(txt); if (Array.isArray(p)) return p; if (p.rows) return p.rows; if (typeof p.result === 'string') txt = p.result; else if (Array.isArray(p.result)) return p.result; } catch (e) {}
+        const m = txt.match(/\[[\s\S]*\]/);
+        if (m) { try { const arr = JSON.parse(m[0]); if (Array.isArray(arr)) return arr; } catch (e) {} }
+      }
+    }
+  }
+  return [];
+}
+
+// ---------- money math ----------
+function jobShare(j) {
+  if (!money) return { rate: 0, ours: 0, each: 0, tech: 0 };
+  const rate = (money.region_share || {})[j.region] ?? 0;
+  const base = Number(j.charged) - (money.parts_off_top ? Number(j.parts) : 0);
+  const ours = base * rate;
+  return { rate, ours, each: ours * (money.partner_split ?? 0.5), tech: base - ours };
+}
+function moneyTotals() {
+  const t = { charged: 0, tips: 0, parts: 0, ours: 0, each: 0, tech: 0, n: jobs.length };
+  for (const j of jobs) { const s = jobShare(j); t.charged += Number(j.charged); t.tips += Number(j.tip); t.parts += Number(j.parts); t.ours += s.ours; t.each += s.each; t.tech += s.tech; }
+  const spend = money ? Number(money.ad_spend) : 0;
+  const split = money ? (money.partner_split ?? 0.5) : 0.5;
+  t.spend = spend; t.net = t.ours - spend; t.netEach = t.net * split;
+  t.afekAdsHalf = spend * split;
+  t.afekOwes = t.each + t.afekAdsHalf - (money ? Number(money.afek_ads_paid) + Number(money.afek_paid_since || 0) : 0);
+  t.costPerClose = t.n ? spend / t.n : 0;
+  t.sharePerDollar = spend ? t.ours / spend : 0;
+  t.avgTicket = t.n ? t.charged / t.n : 0;
+  return t;
+}
+
+function renderAll() {
+  if (!leadsReady) return;
+  renderKPIs(); renderWeekly(); renderFunnel(); renderAppointments(); renderPipeline(); renderMoney(); renderMetrics(); renderActivity();
+  setStatus('ok', 'Updated ' + fmtTime(new Date()));
+}
+
+function renderKPIs() {
+  const real = leads.filter(l => !isImported(l));
+  const ready = real.filter(l => l.stage === 'ready_to_confirm').length;
+  const qualifying = real.filter(l => l.stage === 'qualifying').length;
+  const pending = appointments.filter(a => a.status === 'pending').length;
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const todayLeads = real.filter(l => new Date(l.created_at).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) === today).length;
+  const t = moneyTotals();
+  document.getElementById('kpis').innerHTML =
+    '<div class="kpi"><div class="label">Leads</div><div class="value">' + real.length + '</div><div class="sub">+' + todayLeads + ' today</div></div>' +
+    '<div class="kpi"><div class="label">Qualifying</div><div class="value" style="color:var(--purple)">' + qualifying + '</div><div class="sub">' + ready + ' ready to confirm</div></div>' +
+    '<div class="kpi"><div class="label">Appointments</div><div class="value" style="color:var(--accent)">' + pending + '</div><div class="sub">pending</div></div>' +
+    '<div class="kpi"><div class="label">Jobs closed</div><div class="value" style="color:var(--green)">' + t.n + '</div><div class="sub">' + usd0(t.charged) + ' charged</div></div>' +
+    '<div class="kpi"><div class="label">Cost per close</div><div class="value">' + (t.n ? usd0(t.costPerClose) : '—') + '</div><div class="sub">' + usd0(t.spend) + ' ad spend</div></div>';
+}
+
+function renderAppointments() {
+  const el = document.getElementById('appointments');
+  const real = appointments.filter(a => a.status !== 'cancelled');
+  if (real.length === 0) { el.innerHTML = '<div class="card"><div class="empty">No appointments yet</div></div>'; return; }
+  let html = '<div class="section-header"><h2>Jobs</h2><span class="count">' + real.length + ' active</span></div><div class="card">';
+  for (const a of real) {
+    const name = [a.lead_first_name, a.lead_last_name].filter(Boolean).join(' ') || 'Unknown';
+    const badge = a.status === 'confirmed' ? 'badge-confirmed' : a.status === 'completed' ? 'badge-completed' : 'badge-pending';
+    const first = (a.notes || '').split('\n')[0];
+    html += '<div class="appt-item"><div class="appt-top"><span class="appt-name">' + esc(name) + '</span><span class="appt-badge ' + badge + '">' + esc(a.status) + '</span></div>';
+    html += '<div class="appt-details"><span>' + esc(a.lead_phone || '—') + '</span><span>' + esc(a.service) + '</span><span>' + esc(a.address) + '</span>';
+    if (/^IVY JOB/.test(first)) html += '<span><strong>' + esc(first.replace(/^IVY JOB — /, '')) + '</strong></span>';
+    html += '</div>';
+    if (a.notes) html += '<div class="appt-notes" onclick="this.classList.toggle(\'expanded\')">' + esc(a.notes) + '</div>';
+    html += '</div>';
+  }
+  el.innerHTML = html + '</div>';
+}
+
+function renderPipeline() {
+  const el = document.getElementById('pipeline');
+  const active = leads.filter(l => l.stage === 'qualifying' || l.stage === 'ready_to_confirm')
+    .sort((a, b) => ((a.stage === 'ready_to_confirm' ? 0 : 1) - (b.stage === 'ready_to_confirm' ? 0 : 1)) || new Date(b.created_at) - new Date(a.created_at));
+  if (active.length === 0) { el.innerHTML = '<div class="card"><div class="empty">No active leads</div></div>'; return; }
+  let html = '<div class="section-header"><h2>Active Pipeline</h2><span class="count">' + active.length + ' leads</span></div><div class="card">';
+  for (const l of active) {
+    const name = [l.first_name, l.last_name].filter(Boolean).join(' ') || 'No name yet';
+    const ready = l.stage === 'ready_to_confirm';
+    html += '<div class="lead-item"><div class="lead-info"><div class="lead-name">' + esc(name) + (l.agent_paused ? ' <span class="chip">bot paused</span>' : '') + '</div><div class="lead-meta">';
+    if (l.phone) html += '<span>' + esc(l.phone) + '</span>';
+    if (l.town || l.zip) html += '<span>' + esc([l.town, l.zip].filter(Boolean).join(' ')) + '</span>';
+    if (l.service) html += '<span>' + esc(l.service) + '</span>';
+    if (l.followup_count > 0) html += '<span>' + l.followup_count + ' follow-up' + (l.followup_count > 1 ? 's' : '') + '</span>';
+    html += '</div></div><div class="lead-right"><span class="stage-badge ' + (ready ? 'stage-ready' : 'stage-qualifying') + '">' + (ready ? 'Ready' : 'Qualifying') + '</span><span class="time-ago">' + timeAgo(l.last_inbound_at || l.created_at) + '</span></div></div>';
+  }
+  el.innerHTML = html + '</div>';
+}
+
+function renderMoney() {
+  const el = document.getElementById('money');
+  if (!money) { el.innerHTML = '<div class="card"><div class="empty">Loading money…</div></div>'; return; }
+  const t = moneyTotals();
+  const rs = money.region_share || {};
+  let html = '<div class="kpi-row">' +
+    '<div class="kpi"><div class="label">Ad spend</div><div class="value">' + usd0(t.spend) + '</div><div class="sub">as of ' + esc(money.ad_spend_as_of || '') + '</div></div>' +
+    '<div class="kpi"><div class="label">Charged</div><div class="value">' + usd0(t.charged) + '</div><div class="sub">' + t.n + ' jobs, tips excluded</div></div>' +
+    '<div class="kpi"><div class="label">Our share</div><div class="value">' + usd0(t.ours) + '</div><div class="sub">' + usd0(t.each) + ' each</div></div>' +
+    '<div class="kpi"><div class="label">Net each</div><div class="value" style="color:' + (t.netEach >= 0 ? 'var(--green)' : 'var(--red)') + '">' + usd0(t.netEach) + '</div><div class="sub">after ads</div></div>' +
+    '<div class="kpi"><div class="label">Afek owes Michel</div><div class="value" style="color:var(--amber)">' + usd0(t.afekOwes) + '</div><div class="sub">to settle</div></div>' +
+    '</div>';
+
+  html += '<div class="section-header"><h2>Closed jobs</h2><span class="count">' + t.n + ' jobs</span></div><div class="card tbl-wrap"><table class="t"><thead><tr><th>Date</th><th>Customer</th><th>Region</th><th class="num">Charged</th><th class="num">Tip</th><th class="num">Our %</th><th class="num">Our share</th><th class="num">Each</th></tr></thead><tbody>';
+  for (const j of jobs) {
+    const s = jobShare(j);
+    html += '<tr><td>' + esc(fmtDay(j.job_date)) + '</td><td>' + esc(j.customer) + (j.notes ? '<div class="note" style="margin-top:2px">' + esc(j.notes) + '</div>' : '') + '</td><td><span class="chip">' + esc(j.region) + '</span></td><td class="num">' + usd(Number(j.charged)) + '</td><td class="num">' + usd(Number(j.tip)) + '</td><td class="num">' + pct(s.rate) + '</td><td class="num">' + usd(s.ours) + '</td><td class="num">' + usd(s.each) + '</td></tr>';
+  }
+  html += '<tr class="total"><td colspan="3">Total</td><td class="num">' + usd(t.charged) + '</td><td class="num">' + usd(t.tips) + '</td><td></td><td class="num">' + usd(t.ours) + '</td><td class="num">' + usd(t.each) + '</td></tr></tbody></table></div>';
+
+  html += '<div class="two-col" style="margin-top:16px">';
+  html += '<div><div class="section-header"><h2>Who owes whom</h2></div><div class="card owe">' +
+    '<div class="owe-row"><span>Michel\'s share of jobs (Afek collected it)</span><span>' + usd(t.each) + '</span></div>' +
+    '<div class="owe-row"><span>Afek\'s half of ads</span><span>' + usd(t.afekAdsHalf) + '</span></div>' +
+    '<div class="owe-row"><span>Less: Afek already put toward ads</span><span>' + usd(-Number(money.afek_ads_paid)) + '</span></div>' +
+    (Number(money.afek_paid_since || 0) ? '<div class="owe-row"><span>Less: later payments</span><span>' + usd(-Number(money.afek_paid_since)) + '</span></div>' : '') +
+    '<div class="owe-row final"><span>Afek owes Michel</span><span>' + usd(t.afekOwes) + '</span></div></div></div>';
+  html += '<div><div class="section-header"><h2>Split by region</h2></div><div class="card owe">';
+  for (const r of ['NJ', 'MA', 'CT', 'RI']) html += '<div class="owe-row"><span>' + r + '</span><span>' + pct(rs[r] ?? 0) + ' us · ' + pct(1 - (rs[r] ?? 0)) + ' tech</span></div>';
+  html += '</div><div class="note">Our share is split 50/50 between Michel and Afek. Tips go to the tech. Parts ' + (money.parts_off_top ? 'come off the top before the split.' : 'are not deducted before the split (open question for Jose\'s $100 UV parts).') + '</div></div>';
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+// ---------- weekly report (fadc.weekly_report view + fadc.weekly_briefings) ----------
+function fmtRange(a, b) {
+  const o = { month: 'short', day: 'numeric' };
+  return new Date(a + 'T12:00:00').toLocaleDateString('en-US', o) + ' – ' + new Date(b + 'T12:00:00').toLocaleDateString('en-US', o);
+}
+function rate(x) { return x === null || x === undefined ? '—' : pct(Number(x)); }
+function money2(x) { return x === null || x === undefined ? '—' : usd0(Number(x)); }
+
+function renderWeekly() {
+  const el = document.getElementById('weekly');
+  if (!weekly.length) { el.innerHTML = '<div class="card"><div class="empty">Loading the weekly report…</div></div>'; return; }
+  const w = weekly[0];
+  const N = k => Number(w[k] || 0);
+  let html = '';
+
+  // Claude's briefing for the most recent week that has one
+  const b = briefings[0];
+  if (b) {
+    const wk = weekly.find(r => r.week_start === b.week_start);
+    const items = String(b.body).split('\n').map(s => s.replace(/^\s*-\s*/, '').trim()).filter(Boolean);
+    html += '<div class="brief"><div class="brief-top"><span class="brief-week">Weekly briefing · ' + esc(wk ? fmtRange(wk.week_start, wk.week_end) : b.week_start) + '</span>' +
+      (b.verdict ? '<span class="verdict ' + esc(b.verdict) + '">' + esc(b.verdict === 'breakeven' ? 'break-even' : b.verdict) + '</span>' : '') + '</div>' +
+      '<h3>' + esc(b.headline) + '</h3><ul>' + items.map(i => '<li>' + esc(i) + '</li>').join('') + '</ul>' +
+      '<div class="by">Written by Claude on ' + new Date(b.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' }) + '. New briefing every Monday morning.</div></div>';
+  }
+
+  // Current week live numbers
+  const profitAll = N('profit_michel_pays_ads');
+  html += '<div class="section-header"><h2>' + (w.spend_final ? 'Last week' : 'This week so far') + '</h2><span class="count">' + fmtRange(w.week_start, w.week_end) + '</span></div>';
+  html += '<div class="kpi-row">' +
+    '<div class="kpi"><div class="label">Invested in ads</div><div class="value">' + usd0(N('ad_spend')) + '</div><div class="sub">' + (w.cost_per_conversation ? usd(Number(w.cost_per_conversation)) + ' per conversation' : 'Meta') + '</div></div>' +
+    '<div class="kpi"><div class="label">Revenue charged</div><div class="value">' + usd0(N('revenue_charged')) + '</div><div class="sub">' + N('jobs_closed') + ' jobs closed</div></div>' +
+    '<div class="kpi"><div class="label">Your share</div><div class="value">' + usd0(N('michel_share')) + '</div><div class="sub">half of our ' + usd0(N('our_share')) + '</div></div>' +
+    '<div class="kpi"><div class="label">Profit</div><div class="value" style="color:' + (profitAll >= 0 ? 'var(--green)' : 'var(--red)') + '">' + usd0(profitAll) + '</div><div class="sub">you pay all ads · ' + usd0(N('profit_ads_split')) + ' if split</div></div>' +
+    '</div>';
+
+  // Conversion funnel
+  html += '<div class="funnel">' +
+    '<div><div class="l">Meta chats</div><div class="n">' + N('meta_conversations') + '</div><div class="r">' + money2(w.cost_per_conversation) + ' each</div></div>' +
+    '<div><div class="l">Leads</div><div class="n">' + N('leads') + '</div><div class="r">' + money2(w.cost_per_lead) + ' each</div></div>' +
+    '<div><div class="l">Booked</div><div class="n">' + N('appointments_booked') + '</div><div class="r">' + rate(w.lead_to_appt_rate) + ' of leads</div></div>' +
+    '<div><div class="l">Closed</div><div class="n">' + N('jobs_closed') + '</div><div class="r">' + rate(w.lead_to_job_rate) + ' of leads · ' + money2(w.cost_per_job) + '/job</div></div>' +
+    '</div>';
+
+  // Profit by week (you pay all ads)
+  const rows = weekly.slice().reverse();
+  const maxAbs = Math.max(1, ...rows.map(r => Math.abs(Number(r.profit_michel_pays_ads))));
+  html += '<div class="section-header"><h2>Profit by week</h2><span class="count">your share minus all ad spend</span></div><div class="card bars">';
+  for (const r of rows) {
+    const p = Number(r.profit_michel_pays_ads), wpct = (Math.abs(p) / maxAbs) * 50;
+    html += '<div class="bar-row"><span style="color:var(--fg-muted)">' + new Date(r.week_start + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + '</span>' +
+      '<div class="bar-track"><div class="bar ' + (p >= 0 ? 'pos' : 'neg') + '" style="width:' + wpct.toFixed(1) + '%"></div></div>' +
+      '<span class="v" style="color:' + (p >= 0 ? 'var(--green)' : 'var(--red)') + '">' + usd0(p) + '</span></div>';
+  }
+  html += '</div>';
+
+  // Full table with totals
+  const tot = { s: 0, c: 0, l: 0, a: 0, j: 0, rev: 0, share: 0, our: 0 };
+  html += '<div class="section-header" style="margin-top:20px"><h2>All weeks</h2><span class="count">Mon–Sun, Eastern</span></div><div class="card tbl-wrap"><table class="t"><thead><tr><th>Week</th><th class="num">Ads</th><th class="num">Chats</th><th class="num">Leads</th><th class="num">Booked</th><th class="num">Jobs</th><th class="num">Lead→job</th><th class="num">Revenue</th><th class="num">Your share</th><th class="num">Profit</th></tr></thead><tbody>';
+  for (const r of weekly) {
+    const p = Number(r.profit_michel_pays_ads);
+    tot.s += Number(r.ad_spend); tot.c += Number(r.meta_conversations); tot.l += Number(r.leads); tot.a += Number(r.appointments_booked);
+    tot.j += Number(r.jobs_closed); tot.rev += Number(r.revenue_charged); tot.share += Number(r.michel_share); tot.our += Number(r.our_share);
+    html += '<tr' + (r === w && !w.spend_final ? ' class="current"' : '') + '><td>' + fmtRange(r.week_start, r.week_end) + (r.spend_final ? '' : ' <span class="chip">live</span>') + '</td>' +
+      '<td class="num">' + usd0(Number(r.ad_spend)) + '</td><td class="num">' + r.meta_conversations + '</td><td class="num">' + (Number(r.leads) || '—') + '</td><td class="num">' + r.appointments_booked + '</td><td class="num">' + r.jobs_closed + '</td>' +
+      '<td class="num">' + rate(r.lead_to_job_rate) + '</td><td class="num">' + usd0(Number(r.revenue_charged)) + '</td><td class="num">' + usd0(Number(r.michel_share)) + '</td>' +
+      '<td class="num ' + (p >= 0 ? 'delta-up' : 'delta-down') + '">' + usd0(p) + '</td></tr>';
+  }
+  const totP = tot.share - tot.s;
+  html += '<tr class="total"><td>Total</td><td class="num">' + usd0(tot.s) + '</td><td class="num">' + tot.c + '</td><td class="num">' + tot.l + '</td><td class="num">' + tot.a + '</td><td class="num">' + tot.j + '</td><td class="num">' + (tot.l ? pct(tot.j / tot.l) : '—') + '</td><td class="num">' + usd0(tot.rev) + '</td><td class="num">' + usd0(tot.share) + '</td><td class="num ' + (totP >= 0 ? 'delta-up' : 'delta-down') + '">' + usd0(totP) + '</td></tr></tbody></table></div>';
+
+  // Break-even line
+  const avgShare = tot.j ? tot.share / tot.j : 0, weeksN = weekly.length || 1, avgSpend = tot.s / weeksN;
+  html += '<div class="note">Break-even: at about ' + usd0(avgSpend) + ' a week in ads you need ' + (avgShare ? (avgSpend / avgShare).toFixed(1) : '—') + ' average jobs a week (your share averages ' + usd0(avgShare) + ' per job). ' +
+    'If Afek pays half the ads, overall you are ' + usd0((tot.our - tot.s) / 2) + '. Ad spend comes straight from Meta every 4 hours; jobs come from the Money tab. Leads were only logged from Sep 28 on, so earlier weeks show "—".</div>';
+
+  el.innerHTML = html;
+}
+
+
+// ---------- booked vs not (leads of the week) ----------
+function etMonday(offsetWeeks) {
+  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const dow = (now.getDay() + 6) % 7;
+  const m = new Date(now.getFullYear(), now.getMonth(), now.getDate() - dow - 7 * offsetWeeks);
+  return m;
+}
+function etDate(d) { return new Date(new Date(d).toLocaleString('en-US', { timeZone: 'America/New_York' })); }
+function setFunnelWeek(n) { funnelWeek = n; renderFunnel(); }
+function renderFunnel() {
+  const el = document.getElementById('funnel');
+  if (!funnel.length && !leadsReady) return;
+  const start = etMonday(funnelWeek), end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 7);
+  const rows = funnel.filter(l => { if (isImported(l)) return false; const d = etDate(l.created_at); return d >= start && d < end; });
+  const cats = { booked: [], hot: [], warm: [], lost: [] };
+  for (const l of rows) {
+    if (l.appt_status && l.appt_status !== 'cancelled') cats.booked.push(l);
+    else if (l.stage === 'closed_lost') cats.lost.push(l);
+    else if (l.phone || l.first_name) cats.hot.push(l);
+    else cats.warm.push(l);
+  }
+  const info = {
+    booked: ['Booked', 'var(--green)'],
+    hot: ['Gave name or phone, no appointment', 'var(--amber)'],
+    warm: ['Chatting, no contact info yet', 'var(--purple)'],
+    lost: ['Lost', 'var(--red)']
+  };
+  const total = rows.length;
+  let html = '<div class="section-header"><h2>Leads ' + (funnelWeek === 0 ? 'this week' : 'last week') + '</h2><span class="seg"><button class="' + (funnelWeek === 0 ? 'on' : '') + '" onclick="setFunnelWeek(0)">This week</button><button class="' + (funnelWeek === 1 ? 'on' : '') + '" onclick="setFunnelWeek(1)">Last week</button></span></div>';
+  html += '<div class="kpi-row">' +
+    '<div class="kpi"><div class="label">Leads</div><div class="value">' + total + '</div><div class="sub">' + fmtRange(start.toLocaleDateString('en-CA'), new Date(end.getTime() - 86400000).toLocaleDateString('en-CA')) + '</div></div>' +
+    '<div class="kpi"><div class="label">Booked</div><div class="value" style="color:var(--green)">' + cats.booked.length + '</div><div class="sub">' + (total ? pct(cats.booked.length / total) : '—') + ' of leads</div></div>' +
+    '<div class="kpi"><div class="label">Left contact, not booked</div><div class="value" style="color:var(--amber)">' + cats.hot.length + '</div><div class="sub">follow up by hand</div></div>' +
+    '<div class="kpi"><div class="label">No contact yet</div><div class="value" style="color:var(--purple)">' + cats.warm.length + '</div><div class="sub">bot still working</div></div>' +
+    '<div class="kpi"><div class="label">Lost</div><div class="value" style="color:var(--red)">' + cats.lost.length + '</div><div class="sub">closed lost</div></div></div>';
+  for (const k of ['booked', 'hot', 'warm', 'lost']) {
+    const list = cats[k];
+    html += '<div class="cat"><h3 style="color:' + info[k][1] + '">' + info[k][0] + '</h3><span class="count">' + list.length + '</span></div><div class="card">';
+    if (!list.length) html += '<div class="empty">None</div>';
+    for (const l of list) {
+      const name = [l.first_name, l.last_name].filter(Boolean).join(' ') || 'No name';
+      html += '<div class="lead-item"><div class="lead-info"><div class="lead-name">' + esc(name) + (l.ad_title ? ' <span class="chip">' + esc(String(l.ad_title).split(' |')[0]) + '</span>' : '') + '</div><div class="lead-meta">' +
+        (l.phone ? '<span>' + esc(l.phone) + '</span>' : '') + (l.town || l.zip ? '<span>' + esc([l.town, l.zip].filter(Boolean).join(' ')) + '</span>' : '') +
+        '<span>' + l.customer_msgs + ' customer msgs</span>' + (l.followup_count > 0 ? '<span>' + l.followup_count + ' follow-up</span>' : '') + '</div>' +
+        (l.last_customer_text ? '<div class="said">Last said: “' + esc(String(l.last_customer_text).substring(0, 110)) + '”</div>' : '') + '</div>' +
+        '<div class="lead-right"><span class="time-ago">' + fmtDay(new Date(l.created_at).toLocaleDateString('en-CA', { timeZone: 'America/New_York' })) + '</span><span class="time-ago">' + timeAgo(l.last_inbound_at || l.created_at) + '</span></div></div>';
+    }
+    html += '</div>';
+  }
+  html += '<div class="note">Booked = has an appointment that is not cancelled. "Left contact" = gave a name or phone but nothing is booked yet; these are the ones worth a call. Week runs Monday to Sunday, Eastern.</div>';
+  el.innerHTML = html;
+}
+
+function deltaCell(now, base, lowerIsBetter) {
+  if (now === null || now === undefined || base === null || base === undefined) return '<td class="num">—</td>';
+  const better = lowerIsBetter ? now < base : now > base;
+  const same = Math.abs(now - base) < 1e-9;
+  return '<td class="num ' + (same ? '' : better ? 'delta-up' : 'delta-down') + '">' + (same ? 'same' : better ? 'better' : 'worse') + '</td>';
+}
+
+function renderMetrics() {
+  const el = document.getElementById('metrics');
+  if (!stats || !money) { el.innerHTML = '<div class="card"><div class="empty">Loading metrics…</div></div>'; return; }
+  const t = moneyTotals();
+  const s = stats;
+  const rows = [
+    ['Cost per closed job', BASELINE.costPerClose, t.n ? t.costPerClose : null, usd0, true, 'Ad spend ÷ jobs closed'],
+    ['Our share per $1 of ads', BASELINE.sharePerDollar, t.spend ? t.sharePerDollar : null, v => v.toFixed(2) + 'x', false, 'Main money number'],
+    ['Jobs closed (total)', BASELINE.closed, t.n, v => String(v), false, 'From the Money tab'],
+    ['Appointments booked, last 7 days', BASELINE.appts7d, Number(s.appts_7d), v => String(v), false, 'Bot tickets, cancelled excluded'],
+    ['Comments turned into a private chat, last 7 days', BASELINE.comments7d, Number(s.comments_replied_7d), v => String(v), false, 'New since Oct 6'],
+  ];
+  let html = '<div class="section-header"><h2>Did it work?</h2><span class="count">baseline ' + BASELINE.date + '</span></div><div class="card tbl-wrap"><table class="t"><thead><tr><th>Metric</th><th class="num">Baseline</th><th class="num">Now</th><th class="num">Trend</th><th>How it is measured</th></tr></thead><tbody>';
+  for (const [label, base, now, f, lower, how] of rows) {
+    html += '<tr><td>' + esc(label) + '</td><td class="num">' + f(base) + '</td><td class="num">' + (now === null ? '—' : f(now)) + '</td>' + deltaCell(now, base, lower) + '<td style="color:var(--fg-muted)">' + esc(how) + '</td></tr>';
+  }
+  html += '</tbody></table></div>';
+
+  html += '<div class="section-header" style="margin-top:20px"><h2>Last 7 days</h2></div><div class="kpi-row">' +
+    '<div class="kpi"><div class="label">New leads</div><div class="value">' + s.leads_7d + '</div><div class="sub">import excluded</div></div>' +
+    '<div class="kpi"><div class="label">Comments</div><div class="value">' + s.comments_7d + '</div><div class="sub">' + s.comments_replied_7d + ' answered by DM</div></div>' +
+    '<div class="kpi"><div class="label">Bot messages</div><div class="value">' + s.bot_7d + '</div><div class="sub">' + s.followups_7d + ' follow-ups</div></div>' +
+    '<div class="kpi"><div class="label">Team messages</div><div class="value">' + s.human_7d + '</div><div class="sub">by hand</div></div>' +
+    '<div class="kpi"><div class="label">Bot share</div><div class="value">' + ((Number(s.bot_7d) + Number(s.human_7d)) ? Math.round(100 * Number(s.bot_7d) / (Number(s.bot_7d) + Number(s.human_7d))) + '%' : '—') + '</div><div class="sub">of outbound</div></div>' +
+    '</div>';
+  html += '<div class="note">Cost per conversation lives in Ads Manager (N2 was $8.41 on Oct 5). Ad spend here updates when Claude records the new total. The G2 and video test is reviewed on Oct 13.</div>';
+  el.innerHTML = html;
+}
+
+function renderActivity() {
+  const el = document.getElementById('activity');
+  if (messages.length === 0) { el.innerHTML = '<div class="card"><div class="empty">No messages yet</div></div>'; return; }
+  let html = '<div class="section-header"><h2>Recent Activity</h2><span class="count">last 50 messages</span></div><div class="card">';
+  for (const m of messages) {
+    const name = [m.lead_first_name, m.lead_last_name].filter(Boolean).join(' ') || '—';
+    const who = m.sent_by || m.role || 'unknown';
+    const cls = who === 'customer' ? 'customer' : who === 'agent' ? 'agent' : who === 'human' ? 'human' : 'followup';
+    const label = who === 'customer' ? ('← ' + name) : who === 'agent' ? 'Bot →' : who === 'human' ? 'Team →' : 'Follow-up →';
+    const text = m.text || '';
+    html += '<div class="msg-item"><div class="msg-header"><span class="msg-who ' + cls + '">' + esc(label) + '</span><span class="msg-time">' + fmtTime(m.created_at) + '</span></div><div class="msg-text">' + esc(text.substring(0, 200)) + (text.length > 200 ? '…' : '') + '</div>';
+    if (who !== 'customer') html += '<div class="msg-lead">to ' + esc(name) + '</div>';
+    html += '</div>';
+  }
+  el.innerHTML = html + '</div>';
+}
+
+document.querySelectorAll('.tab').forEach(function (tab) {
+  tab.addEventListener('click', function () {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById(tab.dataset.tab).classList.add('active');
+    try { localStorage.setItem('fadc-tab', tab.dataset.tab); } catch (e) {}
+  });
+});
+try { const saved = localStorage.getItem('fadc-tab'); if (saved) { const b = document.getElementById('tab-' + saved); if (b) b.click(); } } catch (e) {}
+
+const API_URL = 'https://lvqeucpqgqcxsghqsemn.supabase.co/functions/v1/fadc-dashboard';
+// Access key: opened once with #k=KEY in the link, or typed on the gate. Kept only in this browser.
+function getKey() { try { return localStorage.getItem('fadc-key') || ''; } catch (e) { return window.__k || ''; } }
+function setKey(k) { try { localStorage.setItem('fadc-key', k); } catch (e) { window.__k = k; } }
+function clearKey() { try { localStorage.removeItem('fadc-key'); } catch (e) {} window.__k = ''; }
+(function () { const m = (location.hash || '').match(/[#&]k=([^&]+)/); if (m) { setKey(decodeURIComponent(m[1])); try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {} } })();
+function showGate(msg) {
+  main.hidden = true; promptEl.hidden = true;
+  document.getElementById('gate').hidden = false;
+  document.getElementById('gate-err').textContent = msg || '';
+  setStatus('error', 'Locked');
+}
+document.getElementById('gate-go').addEventListener('click', function () {
+  const v = document.getElementById('gate-key').value.trim();
+  if (!v) return;
+  setKey(v); document.getElementById('gate').hidden = true; main.hidden = false; fetchData();
+});
+document.getElementById('gate-key').addEventListener('keydown', function (e) { if (e.key === 'Enter') document.getElementById('gate-go').click(); });
+let fetchErrors = 0;
+
+async function fetchData() {
+  try {
+    setStatus('loading', 'Loading data…');
+    const key = getKey();
+    if (!key) { showGate(''); return; }
+    const res = await fetch(API_URL, { headers: { 'x-dash-key': key } });
+    if (res.status === 401) { clearKey(); showGate('That key was not accepted.'); return; }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const d = await res.json();
+    leads = d.leads || [];
+    leadsReady = true;
+    appointments = d.appointments || [];
+    messages = d.messages || [];
+    jobs = d.jobs || [];
+    weekly = d.weekly || [];
+    briefings = d.briefings || [];
+    funnel = d.funnel || [];
+    stats = d.stats || null;
+    try { money = d.money && d.money[0] ? (typeof d.money[0].value === 'string' ? JSON.parse(d.money[0].value) : d.money[0].value) : null; } catch (e) { money = null; }
+    fetchErrors = 0;
+    promptEl.hidden = true;
+    document.getElementById('gate').hidden = true;
+    main.hidden = false;
+    setStatus('ok', 'Updated ' + new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' }));
+    renderAll();
+  } catch (e) {
+    fetchErrors++;
+    if (fetchErrors >= 3) {
+      promptEl.hidden = false;
+      promptEl.innerHTML = '<strong>Could not load data</strong><br>Error: ' + esc(e.message) + '. Retrying…';
+    }
+    setStatus('error', 'Fetch failed: ' + e.message);
+  }
+}
+
+fetchData();
+setInterval(fetchData, 30000);
+</script>
+
+
+
+<script>if ('serviceWorker' in navigator) { window.addEventListener('load', function () { navigator.serviceWorker.register('/sw.js').catch(function () {}); }); }</script>
+</body></html>
