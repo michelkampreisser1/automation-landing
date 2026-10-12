@@ -910,7 +910,7 @@ const UNKNOWN_FACT_ES_RE =
 // live bot (3 oct): "I will get back once I decide" got "No problem at all, we're here
 // whenever you're ready!" and a Connecticut job walked away with no ZIP and no phone.
 const THINKING_RE =
-  /\b(get back (to you|once|when)|let me think|think(ing)? about it|i['’]?ll let you know|(i|we) will let you know|not yet|(i['’]?ll|i will) reach out|need to think|talk to my (wife|husband|partner|landlord|roommate)|check with my (wife|husband|partner|landlord|roommate)|maybe later|not right now|for now|shop(ping)? around|compare|other quotes?|too expensive|a bit much|pricey|send (you )?(a )?(couple|few) (of )?dates|look at (my|the) calendar|check (my|the) calendar|send (you )?some dates)\b/i;
+  /\b(get back (to you|once|when)|let me think|think(ing)? about it|i[‘’]?ll let you know|(i|we) will let you know|not yet|(i[‘’]?ll|i will) reach out|(i[‘’]?ll|i will) (text|message|call|contact) you|when i’?m ready|not right now|for now|need to think|talk to my (wife|husband|partner|landlord|roommate)|check with my (wife|husband|partner|landlord|roommate)|maybe later|shop(ping)? around|compare|other quotes?|too expensive|a bit much|pricey|send (you )?(a )?(couple|few) (of )?dates|look at (my|the) calendar|check (my|the) calendar|send (you )?some dates)\b/i;
 
 const THINKING_ES_RE =
   /(lo pienso|lo voy a pensar|d[\u00e9e]jame pensarlo|dejame pensarlo|te (aviso|digo|confirmo|contesto)|ahorita no|ahora no|por ahora no|m[\u00e1a]s adelante|mas adelante|luego te|preguntar a mi (esposa|esposo|pareja)|consultar con|comparar precios|otras cotizaciones|est[\u00e1a] caro|esta caro|muy caro|sale caro)/i;
@@ -2136,7 +2136,7 @@ function bostonNow(): { weekday: string; hour: number } {
   return { weekday, hour };
 }
 
-// build: v79
+// build: v80
 // v79 changes (12 oct 2026):
 //   1. Soft close strips slot offers from model reply — customer says "let me think",
 //      the model's reply no longer contains "I have Tuesday open" before the soft close copy.
@@ -2195,8 +2195,9 @@ Rules for this one message:
 2. Reference something CONCRETE from your conversation: the service, how many systems, the price you quoted them, the day they mentioned. Prove you remember THEM. A line that could be sent to any stranger is a failure, "Still here if you want to book! We have openings this week" is exactly what NOT to write.
 3. Ask for exactly ONE thing: ${missing[0] ?? "confirming the slot"}.${(!r.preferred_day && slot) ? `\n   Do NOT ask "what day works for you". OFFER this exact slot and ask them to confirm it: ${slot}. A yes/no is a much smaller ask than inventing a date, and every lead we lost died on the open question.` : ""}
 4. Max 30 words. One or two sentences.
-5. BANNED openers and fillers, in any form: "just checking", "just checking in", "checking in", "checking back", "following up", "circling back", "touching base", "wanted to see if", "hope you're well", "hope this finds you". These are the tell that a message is automated. If your draft contains any of them, rewrite it. No apology, no emojis, no pressure.
-${first ? "" : "6. This is the LAST time you write to them. Keep it warm and make it easy to either say yes or let it go, no urgency, no guilt.\n"}
+5. TOWN RULE: If you know their ZIP code but NOT their town name, write "ZIP [number]" or leave the location out entirely. NEVER guess or infer a city name from a ZIP code — you will get it wrong and it will look creepy. Only use the town name if it was explicitly stated in the conversation.
+6. BANNED openers and fillers, in any form: "just checking", "just checking in", "checking in", "checking back", "following up", "circling back", "touching base", "wanted to see if", "hope you're well", "hope this finds you". These are the tell that a message is automated. If your draft contains any of them, rewrite it. No apology, no emojis, no pressure.
+${first ? "" : "7. This is the LAST time you write to them. Keep it warm and make it easy to either say yes or let it go, no urgency, no guilt.\n"}
 If the conversation shows they already said no, booked elsewhere, or are not a customer, return an empty reply.
 Return the same JSON format as always; leave the lead fields as they are.)`;
 };
@@ -2668,24 +2669,26 @@ function closeoutText(a: Record<string, any>, head: string): string {
 // once (closeout_msg_id) and reminded once (closeout_reminded_at); a tap on either closes it.
 async function runCloseout(remind: boolean, dryRun: boolean): Promise<Record<string, unknown>> {
   const today = bostonToday().toISOString().slice(0, 10);
+  // v80: use <= today so past appointments that were never closed out are also caught.
+  // Previously slot_date = today meant citas from Oct 6-8 were silently ignored every day.
   const open = remind
     ? await sql`
         select a.*, l.first_name, l.last_name, l.phone, l.address as lead_address, l.service as lead_service
         from fadc.appointments a join fadc.leads l on l.id = a.lead_id
-        where a.slot_date = ${today}::date
+        where a.slot_date <= ${today}::date
           and a.status in ('pending','confirmed','rescheduled')
           and a.closed_at is null
           and a.closeout_msg_id is not null
           and a.closeout_reminded_at is null
-        order by a.slot_window, a.created_at`
+        order by a.slot_date, a.slot_window, a.created_at`
     : await sql`
         select a.*, l.first_name, l.last_name, l.phone, l.address as lead_address, l.service as lead_service
         from fadc.appointments a join fadc.leads l on l.id = a.lead_id
-        where a.slot_date = ${today}::date
+        where a.slot_date <= ${today}::date
           and a.status in ('pending','confirmed','rescheduled')
           and a.closed_at is null
           and a.closeout_msg_id is null
-        order by a.slot_window, a.created_at`;
+        order by a.slot_date, a.slot_window, a.created_at`;
 
   if (open.length === 0) return { ok: true, today, remind, open: 0, sent: 0 };
   if (!TG_TOKEN || !TG_CHAT) return { ok: false, today, remind, open: open.length, error: "telegram not configured" };
