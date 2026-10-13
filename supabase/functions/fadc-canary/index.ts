@@ -1,5 +1,5 @@
 // fadc-canary — watches whether the fadc crons are actually succeeding.
-// build: v2 (reads fadc.cron_heartbeats instead of net._http_response — no more false positives
+// build: v3 (reads fadc.cron_heartbeats instead of net._http_response — no more false positives
 // from ad-hoc SQL diagnostic calls that happen to hit graph.facebook.com)
 //
 // Each cron job writes its own heartbeat row on success/failure via the heartbeat() helper
@@ -18,7 +18,7 @@ const TG_CHAT = Deno.env.get("TELEGRAM_CHAT_ID") ?? "";
 // Known cron jobs and their maximum allowed staleness (minutes since last_ok_at).
 // Generous padding over actual schedule so normal jitter doesn't fire false alarms.
 const JOBS: Record<string, number> = {
-  fadc_followups:        45,   // runs every 30 min → stale after 45
+  fadc_followups:        60,   // runs every 30 min → stale after 60 (45 was too tight, jitter caused false alerts)
   fadc_ad_spend:        300,   // runs every 4 h   → stale after 5 h
   fadc_closeout_ask:    180,   // runs at 21:00 & 22:00 → stale after 3 h (checked relative to last run)
   fadc_closeout_remind: 180,   // runs at 00:00 & 01:00 → stale after 3 h
