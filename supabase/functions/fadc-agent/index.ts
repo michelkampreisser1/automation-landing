@@ -1127,6 +1127,28 @@ async function notifyTeam(text: string, kind = "info") {
   } catch (_) { /* never block the reply on a notification */ }
 }
 
+// Same as notifyTeam, but for alerts raised OUTSIDE a request (cron sweeps), where the
+// AsyncLocalStorage lead context is empty. The lead id has to be explicit, otherwise the
+// notification lands with lead_id null and the "have I already alerted on this lead?"
+// dedup check in runLeakAlert can never match.
+async function notifyTeamFor(leadId: string, text: string, kind: string) {
+  let delivered = false;
+  if (TG_TOKEN && TG_CHAT) {
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chat_id: TG_CHAT, text }),
+      });
+      delivered = res.ok;
+    } catch (_) { /* fall through to the DB record */ }
+  }
+  try {
+    await sql`insert into fadc.notifications (kind, text, delivered_telegram, lead_id)
+              values (${kind}, ${text}, ${delivered}, ${leadId}::uuid)`;
+  } catch (_) { /* never block the sweep on a notification */ }
+}
+
 // Send a text message back to the customer through the Messenger Send API.
 async function sendMessengerReply(recipientId: string, text: string) {
   if (!META_PAGE_TOKEN || !text) return;
@@ -2136,7 +2158,7 @@ function bostonNow(): { weekday: string; hour: number } {
   return { weekday, hour };
 }
 
-// build: v80
+// build: v81
 // v79 changes (12 oct 2026):
 //   1. Soft close strips slot offers from model reply — customer says "let me think",
 //      the model's reply no longer contains "I have Tuesday open" before the soft close copy.
@@ -2353,6 +2375,77 @@ async function runHumanNudge(dryRun: boolean): Promise<Record<string, unknown>> 
     }
   }
   return { nudged: results.filter((x) => x.nudged).length, results };
+}
+
+// v81 — THE LEAK. Between 10 and 13 oct the ads produced 19 conversations, $129 of spend and
+// ZERO appointments, while the bot ran clean with no errors. The bot was never the problem: it
+// cannot close, only a person can. What broke is that nobody SAW the qualified leads. Jill Gray
+// handed over her ZIP, her phone and her name at 15:20 on 11 oct; nothing was booked in Supabase,
+// Ilay booked her by WhatsApp hours later, and a day after that a teammate was still asking her
+// which day worked. Meanwhile 4 special_pricing leads (multi-system, $300+ tickets) went untouched.
+//
+// So this sweep does one thing: a lead that gave us BOTH a ZIP and a phone and has no appointment
+// gets escalated to Telegram once, 4 hours after their last message, with everything a person
+// needs to pick up the phone. One alert per lead, ever (the notifications row is the ledger).
+// It never messages the customer; the customer side is already covered by runFollowups and
+// runHumanNudge. This is purely a nudge at the humans.
+async function runLeakAlert(dryRun: boolean): Promise<Record<string, unknown>> {
+  const rows = await sql<{
+    id: string; first_name: string | null; phone: string; zip: string | null; town: string | null;
+    service: string | null; address: string | null; stage: string; ad_title: string | null;
+    assigned_to: string | null; hours_cold: number; last_customer: string | null;
+  }[]>`
+    select l.id, l.first_name, l.phone, l.zip, l.town, l.service, l.address, l.stage,
+           l.ad_title, l.assigned_to,
+           round(extract(epoch from (now() - l.last_inbound_at)) / 3600, 1)::float as hours_cold,
+           (select m.text from fadc.messages m
+             where m.lead_id = l.id and m.role = 'customer'
+             order by m.created_at desc limit 1) as last_customer
+    from fadc.leads l
+    where l.phone is not null
+      and l.zip is not null
+      and l.stage <> 'closed_lost'
+      and l.last_inbound_at is not null
+      and l.last_inbound_at < now() - interval '4 hours'
+      -- A lead that went cold a week ago is history, not a leak worth waking anyone for.
+      and l.last_inbound_at > now() - interval '7 days'
+      and not exists (
+        select 1 from fadc.appointments a
+        where a.lead_id = l.id
+          and a.status in ('pending', 'confirmed', 'rescheduled', 'completed'))
+      and not exists (
+        select 1 from fadc.notifications n
+        where n.lead_id = l.id and n.kind = 'leak')
+    order by l.last_inbound_at desc
+    limit 10`;
+
+  const results: Array<Record<string, unknown>> = [];
+  for (const r of rows) {
+    // "not interested" with a phone on file is a closed door, not a leak. Don't send a
+    // teammate to call someone who already said no.
+    // Caught by the first dry run: a lead whose last words were "Cancel everything thanks"
+    // sailed through, because the list only knew "no thanks". Cancellations and "no longer
+    // interested" are the same closed door.
+    if (r.last_customer && /\b(not interested|no longer (interested|need)|no thanks|no thank you|stop|found someone|already (booked|hired|done)|unsubscribe|cancel( |l?ed|l?ing)|never ?mind)\b/i.test(r.last_customer)) {
+      results.push({ id: r.id, skipped: "customer declined" });
+      continue;
+    }
+    const where = r.address ?? [r.town, r.zip].filter(Boolean).join(" ") ?? "area unknown";
+    const text =
+      `\u{1F4B8} QUALIFIED LEAD, NOBODY BOOKED IT\n` +
+      `${r.first_name ?? "Lead"} — ${r.hours_cold}h since their last message\n` +
+      `\u{1F4DE} ${r.phone}\n` +
+      `\u{1F4CD} ${where}\n` +
+      `\u{1F527} ${r.service ?? "service not stated"}\n` +
+      (r.ad_title ? `\u{1F4E3} ${r.ad_title}\n` : "") +
+      (r.assigned_to ? `\u{1F464} assigned to ${r.assigned_to}\n` : "") +
+      (r.last_customer ? `They wrote: "${r.last_customer.slice(0, 140)}"\n` : "") +
+      `→ Call them. There is no appointment in the CRM for this lead.`;
+    if (dryRun) { results.push({ id: r.id, would_alert: text }); continue; }
+    await notifyTeamFor(r.id, text, "leak");
+    results.push({ id: r.id, alerted: true, name: r.first_name, hours_cold: r.hours_cold });
+  }
+  return { leaks: results.filter((x) => x.alerted).length, results };
 }
 
 async function runFollowups(dryRun: boolean): Promise<Record<string, unknown>> {
@@ -3085,8 +3178,12 @@ async function handle(req: Request): Promise<Response> {
       try { resume = await runResume(body.dry_run === true); } catch (e) { resume = { error: e instanceof Error ? e.message : String(e) }; }
       let humanNudge: Record<string, unknown> = {};
       try { humanNudge = await runHumanNudge(body.dry_run === true); } catch (e) { humanNudge = { error: e instanceof Error ? e.message : String(e) }; }
+      // v81: runs on every sweep, and unlike the others it is NOT gated on business hours —
+      // a lead that qualified at 8pm should be on someone's phone that night, not at 9am.
+      let leaks: Record<string, unknown> = {};
+      try { leaks = await runLeakAlert(body.dry_run === true); } catch (e) { leaks = { error: e instanceof Error ? e.message : String(e) }; }
       const fu = await runFollowups(body.dry_run === true);
-      return json(200, { ...fu, resume, humanNudge });
+      return json(200, { ...fu, resume, humanNudge, leaks });
     } catch (err) {
       return json(500, { ok: false, error: err instanceof Error ? err.message : String(err) });
     }
