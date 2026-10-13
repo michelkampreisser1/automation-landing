@@ -1,17 +1,10 @@
-// fadc-canary — watches whether the fadc-agent / fadc-spend crons are actually succeeding.
-// build: v1
+// fadc-canary — watches whether the fadc crons are actually succeeding.
+// build: v2 (reads fadc.cron_heartbeats instead of net._http_response — no more false positives
+// from ad-hoc SQL diagnostic calls that happen to hit graph.facebook.com)
 //
-// Why this exists: on Oct 12-13 the fadc-agent deploy picked up verify_jwt=true, so every
-// cron call for 17.5 hours got a 401. pg_cron's own job-run log showed "succeeded" the whole
-// time — it only knows the HTTP POST was sent, not what came back. The real answer lives in
-// net._http_response, and nobody was watching it. This function watches it, on its own
-// schedule, independent of the crons it's checking (so a cron that stops firing entirely
-// is also caught, not just one that fires and gets rejected).
-//
-// Logic: look at net._http_response rows from the last WINDOW_MINUTES. Any status code
-// outside 200-299, or a timed-out request, counts as a failure. State (ok / alerting) is
-// kept in fadc.settings so we alert once when things break and once when they recover,
-// instead of spamming Telegram every 15 minutes while broken.
+// Each cron job writes its own heartbeat row on success/failure via the heartbeat() helper
+// in its edge function. This canary checks that every known job's last_ok_at is recent
+// enough for its schedule. If any job is stale or has never reported, we alert.
 //
 // Auth: same x-fadc-cron header + fadc.settings['cron_secret'] as the other crons.
 // Deployed with verify_jwt=false — pg_cron calls it without a JWT.
@@ -22,8 +15,17 @@ const DB_URL = Deno.env.get("SUPABASE_DB_URL") ?? "";
 const TG_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN") ?? "";
 const TG_CHAT = Deno.env.get("TELEGRAM_CHAT_ID") ?? "";
 
-const WINDOW_MINUTES = 20; // wider than the 15-min canary schedule, so no gap between runs
-const REALERT_MINUTES = 60; // while still broken, nag again at most this often
+// Known cron jobs and their maximum allowed staleness (minutes since last_ok_at).
+// Generous padding over actual schedule so normal jitter doesn't fire false alarms.
+const JOBS: Record<string, number> = {
+  fadc_followups:        45,   // runs every 30 min → stale after 45
+  fadc_ad_spend:        300,   // runs every 4 h   → stale after 5 h
+  fadc_closeout_ask:    180,   // runs at 21:00 & 22:00 → stale after 3 h (checked relative to last run)
+  fadc_closeout_remind: 180,   // runs at 00:00 & 01:00 → stale after 3 h
+  fadc_weekly_summary: 10200,  // runs Wed 12:00     → stale after 7 d + 2 h (10200 min)
+};
+
+const REALERT_MINUTES = 60;
 
 async function sendTelegram(text: string): Promise<boolean> {
   if (!TG_TOKEN || !TG_CHAT) return false;
@@ -38,6 +40,13 @@ async function sendTelegram(text: string): Promise<boolean> {
     return false;
   }
 }
+
+type HeartbeatRow = {
+  jobname: string;
+  last_attempt_at: string | null;
+  last_ok_at: string | null;
+  last_error: string | null;
+};
 
 Deno.serve(async (req: Request) => {
   const json = (body: unknown, status = 200) =>
@@ -56,20 +65,41 @@ Deno.serve(async (req: Request) => {
       return json({ ok: false, error: "unauthorized" }, 401);
     }
 
-    const failRows = await sql<{ id: number; status_code: number | null; timed_out: boolean; created: string }[]>`
-      select id, status_code, timed_out, created
-      from net._http_response
-      where created > now() - interval '${sql.unsafe(String(WINDOW_MINUTES))} minutes'
-        and (status_code is null or status_code < 200 or status_code >= 300 or timed_out = true)
-      order by id desc
+    // Read all heartbeats
+    const rows = await sql<HeartbeatRow[]>`
+      select jobname, last_attempt_at, last_ok_at, last_error
+      from fadc.cron_heartbeats
     `;
+    const byJob = new Map(rows.map((r) => [r.jobname, r]));
 
-    const totalRows = await sql<{ n: string }[]>`
-      select count(*)::text as n from net._http_response
-      where created > now() - interval '${sql.unsafe(String(WINDOW_MINUTES))} minutes'
-    `;
-    const total = Number(totalRows[0]?.n ?? 0);
+    const now = Date.now();
+    const stale: Array<{ job: string; reason: string }> = [];
 
+    for (const [job, maxMinutes] of Object.entries(JOBS)) {
+      const hb = byJob.get(job);
+      if (!hb) {
+        // Job has never reported — could be freshly deployed, give it one cycle grace.
+        // But if we've been running for a while (canary itself has run before), it's a problem.
+        stale.push({ job, reason: "never reported a heartbeat" });
+        continue;
+      }
+      if (!hb.last_ok_at) {
+        stale.push({
+          job,
+          reason: `last attempt failed: ${hb.last_error ?? "unknown error"}`,
+        });
+        continue;
+      }
+      const ageMin = (now - new Date(hb.last_ok_at).getTime()) / 60_000;
+      if (ageMin > maxMinutes) {
+        stale.push({
+          job,
+          reason: `last_ok ${Math.round(ageMin)} min ago (max ${maxMinutes})${hb.last_error ? ` — last error: ${hb.last_error}` : ""}`,
+        });
+      }
+    }
+
+    // State machine: ok ↔ alerting, same as v1
     const [stateRow] = await sql`select value from fadc.settings where key = 'canary_state'`;
     let state: { status: "ok" | "alerting"; last_alert_at: string | null } = stateRow?.value
       ? JSON.parse(stateRow.value)
@@ -79,42 +109,30 @@ Deno.serve(async (req: Request) => {
     let action = "none";
     let telegramSent = false;
 
-    if (failRows.length > 0) {
-      // Something's failing. No calls at all in the window (total === failRows.length === 0
-      // doesn't apply here since failRows.length>0 implies total>0) — alert now if we weren't
-      // already, or re-alert if we've been broken for a while without a fresh nudge.
+    if (stale.length > 0) {
       const shouldAlert =
         state.status === "ok" ||
         !state.last_alert_at ||
-        (Date.now() - new Date(state.last_alert_at).getTime()) > REALERT_MINUTES * 60_000;
+        (now - new Date(state.last_alert_at).getTime()) > REALERT_MINUTES * 60_000;
 
       if (shouldAlert) {
-        const worst = failRows[0];
-        const lines = failRows.slice(0, 5).map((r) =>
-          `  #${r.id} → ${r.timed_out ? "timeout" : r.status_code} at ${new Date(r.created).toLocaleTimeString("en-US", { timeZone: "America/New_York" })} ET`
-        );
+        const lines = stale.map((s) => `  • ${s.job}: ${s.reason}`);
         const text =
-          `🔴 FADC cron alert: ${failRows.length}/${total} HTTP calls failed in the last ${WINDOW_MINUTES} min.\n` +
-          `Latest: ${worst.timed_out ? "timeout" : worst.status_code} at ${new Date(worst.created).toLocaleTimeString("en-US", { timeZone: "America/New_York" })} ET.\n` +
+          `🔴 FADC cron alert: ${stale.length} job(s) stale or failing.\n` +
           lines.join("\n") +
-          `\nCheck net._http_response and the fadc-agent deploy (verify_jwt must be false).`;
+          `\nCheck edge-function deploys (verify_jwt must be false).`;
         telegramSent = await sendTelegram(text);
         action = "alerted";
       } else {
         action = "already_alerting";
       }
       state = { status: "alerting", last_alert_at: shouldAlert ? nowIso : state.last_alert_at };
-    } else if (total > 0 && state.status === "alerting") {
-      // We were broken and now every call in the window succeeded — recovered.
-      telegramSent = await sendTelegram(`✅ FADC cron recovered — all ${total} calls in the last ${WINDOW_MINUTES} min returned 2xx.`);
+    } else if (state.status === "alerting") {
+      telegramSent = await sendTelegram(
+        `✅ FADC cron recovered — all ${Object.keys(JOBS).length} jobs reporting OK.`,
+      );
       action = "recovered";
       state = { status: "ok", last_alert_at: null };
-    } else if (total === 0) {
-      // No cron activity at all in the window is itself suspicious (fadc_followups runs
-      // every 30 min, so a 20-min window should normally have at least one call once every
-      // other run). Don't hard-alert on this alone — just surface it in the response — since
-      // the window can legitimately be empty right after a fresh deploy.
-      action = "no_calls_in_window";
     }
 
     await sql`
@@ -122,14 +140,29 @@ Deno.serve(async (req: Request) => {
       on conflict (key) do update set value = excluded.value
     `;
 
+    // Write canary's own heartbeat so the table reflects canary is running too
+    await sql`
+      insert into fadc.cron_heartbeats (jobname, last_attempt_at, last_ok_at, last_error)
+      values ('fadc_canary', now(), now(), null)
+      on conflict (jobname) do update set
+        last_attempt_at = now(),
+        last_ok_at = now(),
+        last_error = null
+    `;
+
     return json({
       ok: true,
-      window_minutes: WINDOW_MINUTES,
-      total_calls: total,
-      failed_calls: failRows.length,
+      jobs_checked: Object.keys(JOBS).length,
+      stale_jobs: stale,
       action,
       telegram_sent: telegramSent,
       state,
+      heartbeats: Object.fromEntries(
+        Object.keys(JOBS).map((j) => {
+          const hb = byJob.get(j);
+          return [j, hb ? { last_ok_at: hb.last_ok_at, last_error: hb.last_error } : null];
+        }),
+      ),
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

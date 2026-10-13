@@ -1,5 +1,5 @@
 // fadc-spend — pulls daily Meta ad spend server-side and stores it in fadc.ad_spend.
-// build: v5 (adds read-only ?level=ad|adset breakdown and ?status=<id> node check; no DB writes in either mode)
+// build: v6 (writes a fadc_ad_spend heartbeat on the scheduled run; read/status modes don't)
 //
 // Why this exists: the daily ledger used to be read by driving Ads Manager in Chrome on
 // Michel's Mac. That silently did nothing whenever the Mac was asleep — the ledger sat
@@ -27,6 +27,19 @@ const CONV_ACTIONS = new Set([
   "onsite_conversion.messaging_conversation_started_7d",
   "onsite_conversion.total_messaging_connection",
 ]);
+
+async function heartbeat(sql: ReturnType<typeof postgres>, jobname: string, ok: boolean, error?: string) {
+  try {
+    await sql`
+      insert into fadc.cron_heartbeats (jobname, last_attempt_at, last_ok_at, last_error)
+      values (${jobname}, now(), ${ok ? sql`now()` : null}, ${ok ? null : (error ?? null)})
+      on conflict (jobname) do update set
+        last_attempt_at = now(),
+        last_ok_at = case when ${ok} then now() else fadc.cron_heartbeats.last_ok_at end,
+        last_error = case when ${ok} then null else excluded.last_error end
+    `;
+  } catch { /* heartbeat is best-effort, never block the actual job */ }
+}
 
 const todayNY = () =>
   new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
@@ -230,6 +243,8 @@ Deno.serve(async (req: Request) => {
       values (${from}, ${to}, ${rows.length}, true)
     `;
 
+    await heartbeat(sql, "fadc_ad_spend", true);
+
     return json({
       ok: true,
       token_used: tokenUsed,
@@ -247,6 +262,7 @@ Deno.serve(async (req: Request) => {
         insert into fadc.spend_runs (days_from, days_to, rows_upsert, ok, error)
         values (${from}, ${to}, 0, false, ${msg})
       `;
+      await heartbeat(sql, "fadc_ad_spend", false, msg);
     } catch { /* logging is best effort */ }
     return json({ ok: false, error: msg, range: { from, to } }, 500);
   } finally {

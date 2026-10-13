@@ -15,6 +15,23 @@ function setCtxLead(id: string | null) { const st = leadCtx.getStore(); if (st) 
 
 const sql = postgres(Deno.env.get("SUPABASE_DB_URL")!, { prepare: false, max: 2 });
 
+// Heartbeat: every cron-triggered action records that it actually ran here, independent of
+// net._http_response (which logs EVERY http call in the project, including ad-hoc debugging
+// calls, and so is too noisy to alert on directly). fadc-canary reads this table instead and
+// alerts only when a known job goes quiet longer than its own schedule allows for.
+async function heartbeat(jobname: string, ok: boolean, error?: string) {
+  try {
+    await sql`
+      insert into fadc.cron_heartbeats (jobname, last_attempt_at, last_ok_at, last_error)
+      values (${jobname}, now(), ${ok ? sql`now()` : null}, ${ok ? null : (error ?? null)})
+      on conflict (jobname) do update set
+        last_attempt_at = now(),
+        last_ok_at = case when ${ok} then now() else fadc.cron_heartbeats.last_ok_at end,
+        last_error = case when ${ok} then null else excluded.last_error end
+    `;
+  } catch { /* heartbeat is best-effort, never block the actual job */ }
+}
+
 const WEBHOOK_SECRET = Deno.env.get("FADC_WEBHOOK_SECRET") ?? "";
 const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
 const MODEL = Deno.env.get("ANTHROPIC_MODEL") ?? "claude-haiku-4-5";
@@ -3144,8 +3161,17 @@ async function handle(req: Request): Promise<Response> {
     const byCron = await cronSecretOk(req.headers.get("x-fadc-cron"));
     if (!bySecret && !byCron) return json(401, { error: "unauthorized" });
     try {
-      if (body.action === "closeout") return json(200, await runCloseout(body.remind === true, body.dry_run === true));
-      if (body.action === "weekly_summary") return json(200, await runWeeklySummary(body.dry_run === true));
+      if (body.action === "closeout") {
+        const remind = body.remind === true;
+        const result = await runCloseout(remind, body.dry_run === true);
+        await heartbeat(remind ? "fadc_closeout_remind" : "fadc_closeout_ask", true);
+        return json(200, result);
+      }
+      if (body.action === "weekly_summary") {
+        const result = await runWeeklySummary(body.dry_run === true);
+        await heartbeat("fadc_weekly_summary", true);
+        return json(200, result);
+      }
       // tg_setup: point Telegram at this function. Idempotent, safe to re-run.
       const secret = await tgWebhookSecret();
       if (!secret) return json(500, { error: "tg_webhook_secret missing in fadc.settings" });
@@ -3164,7 +3190,10 @@ async function handle(req: Request): Promise<Response> {
           : info,
       });
     } catch (err) {
-      return json(500, { ok: false, error: err instanceof Error ? err.message : String(err) });
+      const msg = err instanceof Error ? err.message : String(err);
+      if (body.action === "closeout") await heartbeat(body.remind === true ? "fadc_closeout_remind" : "fadc_closeout_ask", false, msg);
+      if (body.action === "weekly_summary") await heartbeat("fadc_weekly_summary", false, msg);
+      return json(500, { ok: false, error: msg });
     }
   }
 
@@ -3183,9 +3212,12 @@ async function handle(req: Request): Promise<Response> {
       let leaks: Record<string, unknown> = {};
       try { leaks = await runLeakAlert(body.dry_run === true); } catch (e) { leaks = { error: e instanceof Error ? e.message : String(e) }; }
       const fu = await runFollowups(body.dry_run === true);
+      await heartbeat("fadc_followups", true);
       return json(200, { ...fu, resume, humanNudge, leaks });
     } catch (err) {
-      return json(500, { ok: false, error: err instanceof Error ? err.message : String(err) });
+      const msg = err instanceof Error ? err.message : String(err);
+      await heartbeat("fadc_followups", false, msg);
+      return json(500, { ok: false, error: msg });
     }
   }
 
