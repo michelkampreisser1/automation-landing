@@ -1,5 +1,5 @@
 // fadc-spend — pulls daily Meta ad spend server-side and stores it in fadc.ad_spend.
-// build: v4 (adds read-only ?level=ad|adset breakdown; no DB writes in that mode)
+// build: v5 (adds read-only ?level=ad|adset breakdown and ?status=<id> node check; no DB writes in either mode)
 //
 // Why this exists: the daily ledger used to be read by driving Ads Manager in Chrome on
 // Michel's Mac. That silently did nothing whenever the Mac was asleep — the ledger sat
@@ -194,6 +194,16 @@ Deno.serve(async (req: Request) => {
     if (level === "ad" || level === "adset") {
       const { rows, tokenUsed, errors } = await fetchBreakdown(level, from, to);
       return json({ ok: true, mode: `breakdown:${level}`, token_used: tokenUsed, token_errors: errors, range: { from, to }, rows });
+    }
+
+    // Read-only node status check: ?status=<ad_id> — confirms an ad's actual on/off state
+    // in Meta's own system, independent of whatever the Ads Manager UI claims mid-publish.
+    const statusId = url.searchParams.get("status");
+    if (statusId) {
+      const { body: node, tokenUsed, errors } = await graphGet(statusId, {
+        fields: "name,status,effective_status,configured_status",
+      });
+      return json({ ok: true, mode: "status", token_used: tokenUsed, token_errors: errors, node });
     }
 
     const { rows, tokenUsed, errors } = await fetchInsights(from, to);
