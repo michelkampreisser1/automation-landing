@@ -39,6 +39,13 @@ const HOURS = Deno.env.get("FADC_HOURS") ?? "Sunday to Thursday 8am-8pm, Friday 
 const TG_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN") ?? "";
 const TG_CHAT = Deno.env.get("TELEGRAM_CHAT_ID") ?? "";
 
+// Twilio WhatsApp — used to notify Afek directly when a job is closed out as "done".
+// Number format: whatsapp:+1XXXXXXXXXX
+const TWILIO_SID = Deno.env.get("TWILIO_ACCOUNT_SID") ?? "";
+const TWILIO_TOKEN = Deno.env.get("TWILIO_AUTH_TOKEN") ?? "";
+const TWILIO_FROM = Deno.env.get("TWILIO_WA_FROM") ?? "whatsapp:+13055264093"; // 305 number
+const AFEK_WA = Deno.env.get("AFEK_WA_NUMBER") ?? "whatsapp:+16178309808";     // Afek's WhatsApp
+
 // Safety kill-switch: while false (default), the agent still receives, qualifies and
 // logs every lead normally, but NEVER actually sends a Messenger reply to a real person.
 // Set the BOT_LIVE_MODE secret to the exact string "true" only once Michel has reviewed
@@ -2755,6 +2762,31 @@ async function tgApi(method: string, body: Record<string, unknown>): Promise<any
   }
 }
 
+// Send a WhatsApp message via Twilio to Afek.
+// Silently skips if creds are not set — Telegram is the primary channel.
+async function sendWhatsApp(body: string): Promise<{ ok: boolean; sid?: string; error?: string }> {
+  if (!TWILIO_SID || !TWILIO_TOKEN) return { ok: false, error: "twilio creds not set" };
+  try {
+    const params = new URLSearchParams({ From: TWILIO_FROM, To: AFEK_WA, Body: body });
+    const res = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Authorization: `Basic ${btoa(`${TWILIO_SID}:${TWILIO_TOKEN}`)}`,
+        },
+        body: params.toString(),
+      },
+    );
+    const json = await res.json();
+    if (res.ok) return { ok: true, sid: json.sid };
+    return { ok: false, error: json.message ?? `HTTP ${res.status}` };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 async function tgWebhookSecret(): Promise<string> {
   const [row] = await sql`select value from fadc.settings where key = 'tg_webhook_secret'`;
   return row?.value ? String(row.value) : "";
@@ -2830,6 +2862,13 @@ async function runCloseout(remind: boolean, dryRun: boolean): Promise<Record<str
       } else {
         await sql`update fadc.appointments set closeout_msg_id = ${r.result.message_id} where id = ${a.id}`;
       }
+      // Mirror to Afek on WhatsApp — just the job info, no buttons (WhatsApp doesn't support them).
+      const customerName = [a.first_name, a.last_name].filter(Boolean).join(" ") || "(no name)";
+      const win = a.exact_window ?? a.slot_window ?? "";
+      const waText = remind
+        ? `⏰ STILL OPEN — ${customerName}\n${isoToMd(a.slot_date) ?? ""} ${win}\n${a.address ?? a.lead_address ?? ""}\nWhat happened? Reply here.`
+        : `📋 END OF DAY — ${customerName}\n${isoToMd(a.slot_date) ?? ""} ${win}\n${a.address ?? a.lead_address ?? ""}\nWhat happened with this job?`;
+      await sendWhatsApp(waText);
     } else {
       errors.push(String(r?.description ?? "send failed"));
     }
@@ -2896,6 +2935,11 @@ async function handleTelegramUpdate(u: Record<string, any>): Promise<Record<stri
         reply_markup: { force_reply: true, selective: true },
       });
       if (p?.ok) await sql`update fadc.appointments set amount_prompt_msg_id = ${p.result.message_id} where id = ${apptId}::uuid`;
+      // Also notify Afek directly on WhatsApp so he doesn't have to check Telegram.
+      const customerName = [a.first_name, a.last_name].filter(Boolean).join(" ") || "the customer";
+      await sendWhatsApp(
+        `✅ Job done — ${customerName} (${a.address ?? a.lead_address ?? ""})\nHow much did you charge? Reply here with the amount (e.g. 249).`,
+      );
     }
     if (outcome === "tech_no_show") {
       await notifyTeam(
