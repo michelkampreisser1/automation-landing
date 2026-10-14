@@ -144,17 +144,30 @@ Deno.serve(async (req: Request) => {
       if (shouldAlert) {
         const parts: string[] = [];
         if (stale.length > 0) {
+          const jobLabels: Record<string, string> = {
+            fadc_followups:        "Follow-ups a leads",
+            fadc_ad_spend:         "Monitor de gasto en anuncios",
+            fadc_closeout_ask:     "Pregunta de cierre al cliente",
+            fadc_closeout_remind:  "Recordatorio de cierre",
+            fadc_weekly_summary:   "Resumen semanal",
+          };
           parts.push(
-            `🔴 FADC cron alert: ${stale.length} job(s) stale or failing.\n` +
-            stale.map((s) => `  • ${s.job}: ${s.reason}`).join("\n") +
-            `\nCheck edge-function deploys (verify_jwt must be false).`
+            `🔴 El bot tiene ${stale.length} tarea(s) caída(s):\n` +
+            stale.map((s) => {
+              const label = jobLabels[s.job] ?? s.job;
+              // Extract minutes from reason like "last_ok 915 min ago (max 180)"
+              const m = s.reason.match(/last_ok (\d+) min ago/);
+              const since = m ? `hace ${Math.round(Number(m[1]) / 60)}h` : s.reason;
+              return `  • ${label} — sin respuesta ${since}`;
+            }).join("\n") +
+            `\n\nNo necesitas hacer nada — me aviso solo cuando se recupere.`
           );
         }
         if (unanswered.length > 0) {
           parts.push(
-            `⚠️ ${unanswered.length} lead(s) waiting ${UNANSWERED_LEAD_MINUTES}+ min with NO bot reply:\n` +
-            unanswered.map((u) => `  • ${u.wait_min} min — "${u.snippet}"`).join("\n") +
-            `\nBot may be down. Check fadc-agent logs.`
+            `⚠️ ${unanswered.length} lead(s) esperando respuesta del bot hace más de ${UNANSWERED_LEAD_MINUTES} min:\n` +
+            unanswered.map((u) => `  • ${u.wait_min} min esperando — "${u.snippet}"`).join("\n") +
+            `\nRevisa si el bot está caído.`
           );
         }
         telegramSent = await sendTelegram(parts.join("\n\n"));
@@ -165,7 +178,7 @@ Deno.serve(async (req: Request) => {
       state = { status: "alerting", last_alert_at: shouldAlert ? nowIso : state.last_alert_at };
     } else if (state.status === "alerting") {
       telegramSent = await sendTelegram(
-        `✅ FADC recovered — all ${Object.keys(JOBS).length} cron jobs OK and no unanswered leads.`,
+        `✅ Todo recuperado — el bot está funcionando normal y no hay leads sin respuesta.`,
       );
       action = "recovered";
       state = { status: "ok", last_alert_at: null };
