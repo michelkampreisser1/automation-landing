@@ -1,6 +1,7 @@
 // fadc-canary — watches whether the fadc crons are actually succeeding.
-// build: v3 (reads fadc.cron_heartbeats instead of net._http_response — no more false positives
-// from ad-hoc SQL diagnostic calls that happen to hit graph.facebook.com)
+// build: v4 — adds unanswered-lead check: alerts when a lead has waited >30 min with no bot reply.
+// v3: reads fadc.cron_heartbeats instead of net._http_response — no more false positives
+// from ad-hoc SQL diagnostic calls that happen to hit graph.facebook.com.
 //
 // Each cron job writes its own heartbeat row on success/failure via the heartbeat() helper
 // in its edge function. This canary checks that every known job's last_ok_at is recent
@@ -26,6 +27,10 @@ const JOBS: Record<string, number> = {
 };
 
 const REALERT_MINUTES = 60;
+
+// Unanswered-lead alert: if a lead's first message has been waiting this many minutes
+// with no bot reply, alert even if all cron jobs are healthy (catches bot downtime silently).
+const UNANSWERED_LEAD_MINUTES = 30;
 
 async function sendTelegram(text: string): Promise<boolean> {
   if (!TG_TOKEN || !TG_CHAT) return false;
@@ -99,6 +104,27 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    // ── Unanswered-lead check ─────────────────────────────────────────────────
+    // Find leads whose first customer message arrived >UNANSWERED_LEAD_MINUTES ago
+    // but have never received a bot reply. This catches silent bot failures.
+    type UnansweredRow = { lead_id: string; first_msg: string; wait_min: number; snippet: string };
+    const unanswered = await sql<UnansweredRow[]>`
+      select
+        l.id as lead_id,
+        min(m.created_at) as first_msg,
+        round(extract(epoch from (now() - min(m.created_at))) / 60) as wait_min,
+        left(min(m.text), 60) as snippet
+      from fadc.leads l
+      join fadc.messages m on m.lead_id = l.id and m.role = 'customer'
+      where l.created_at > now() - interval '24 hours'
+        and not exists (
+          select 1 from fadc.messages m2
+          where m2.lead_id = l.id and m2.role = 'agent'
+        )
+      group by l.id
+      having extract(epoch from (now() - min(m.created_at))) / 60 > ${UNANSWERED_LEAD_MINUTES}
+    `;
+
     // State machine: ok ↔ alerting, same as v1
     const [stateRow] = await sql`select value from fadc.settings where key = 'canary_state'`;
     let state: { status: "ok" | "alerting"; last_alert_at: string | null } = stateRow?.value
@@ -109,19 +135,29 @@ Deno.serve(async (req: Request) => {
     let action = "none";
     let telegramSent = false;
 
-    if (stale.length > 0) {
+    if (stale.length > 0 || unanswered.length > 0) {
       const shouldAlert =
         state.status === "ok" ||
         !state.last_alert_at ||
         (now - new Date(state.last_alert_at).getTime()) > REALERT_MINUTES * 60_000;
 
       if (shouldAlert) {
-        const lines = stale.map((s) => `  • ${s.job}: ${s.reason}`);
-        const text =
-          `🔴 FADC cron alert: ${stale.length} job(s) stale or failing.\n` +
-          lines.join("\n") +
-          `\nCheck edge-function deploys (verify_jwt must be false).`;
-        telegramSent = await sendTelegram(text);
+        const parts: string[] = [];
+        if (stale.length > 0) {
+          parts.push(
+            `🔴 FADC cron alert: ${stale.length} job(s) stale or failing.\n` +
+            stale.map((s) => `  • ${s.job}: ${s.reason}`).join("\n") +
+            `\nCheck edge-function deploys (verify_jwt must be false).`
+          );
+        }
+        if (unanswered.length > 0) {
+          parts.push(
+            `⚠️ ${unanswered.length} lead(s) waiting ${UNANSWERED_LEAD_MINUTES}+ min with NO bot reply:\n` +
+            unanswered.map((u) => `  • ${u.wait_min} min — "${u.snippet}"`).join("\n") +
+            `\nBot may be down. Check fadc-agent logs.`
+          );
+        }
+        telegramSent = await sendTelegram(parts.join("\n\n"));
         action = "alerted";
       } else {
         action = "already_alerting";
@@ -129,7 +165,7 @@ Deno.serve(async (req: Request) => {
       state = { status: "alerting", last_alert_at: shouldAlert ? nowIso : state.last_alert_at };
     } else if (state.status === "alerting") {
       telegramSent = await sendTelegram(
-        `✅ FADC cron recovered — all ${Object.keys(JOBS).length} jobs reporting OK.`,
+        `✅ FADC recovered — all ${Object.keys(JOBS).length} cron jobs OK and no unanswered leads.`,
       );
       action = "recovered";
       state = { status: "ok", last_alert_at: null };
@@ -157,6 +193,7 @@ Deno.serve(async (req: Request) => {
       action,
       telegram_sent: telegramSent,
       state,
+      unanswered_leads: unanswered.length,
       heartbeats: Object.fromEntries(
         Object.keys(JOBS).map((j) => {
           const hb = byJob.get(j);
