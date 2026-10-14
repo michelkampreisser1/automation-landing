@@ -1845,57 +1845,6 @@ async function processInbound(input: {
       await notifyTeam(`\u{1F4CD} ZIP ${newZip} is outside MA/CT/RI (${lead.first_name ?? messengerId}). The agent is still collecting, line up a crew for this area.`, "area");
     }
 
-    // ── Technician coverage check ────────────────────────────────────────────
-    // Runs once per lead when a valid ZIP first arrives. Checks fadc.technicians
-    // to see who, if anyone, covers this ZIP. Alerts Michel so he can act:
-    //   • own tech → normal, no alert needed (they take it through regular flow)
-    //   • subcontractor only → alert to route the lead to that subcontractor
-    //   • no coverage → alert to find someone or recruit for that zone
-    const zipToCheck = newZip ?? (out.lead.zip && !lead.coverage_alerted ? String(out.lead.zip) : null);
-    if (zipToCheck && /^\d{5}$/.test(zipToCheck) && !lead.coverage_alerted) {
-      type TechRow = { name: string; type: string; phone: string | null; split_pct: number | null; flat_fee: number | null };
-      const techs = await sql<TechRow[]>`
-        SELECT name, type, phone, split_pct, flat_fee
-        FROM fadc.technicians
-        WHERE active = true
-          AND ${zipToCheck} = ANY(coverage_zips)
-        ORDER BY type  -- 'own' before 'subcontractor'
-      `;
-      const ownTech = techs.find((t) => t.type === "own");
-      const subTech = techs.find((t) => t.type === "subcontractor");
-      const leadName = (out.lead.first_name ?? lead.first_name ?? "Lead sin nombre") as string;
-      const leadPhone = (out.lead.phone ?? lead.phone ?? "sin teléfono") as string;
-      const leadService = (out.lead.service ?? lead.service ?? "sin servicio") as string;
-
-      if (!ownTech && subTech) {
-        // Covered only by a subcontractor — route to them
-        const fee = subTech.flat_fee != null
-          ? `tarifa fija $${subTech.flat_fee}`
-          : subTech.split_pct != null
-            ? `${subTech.split_pct}% del cierre`
-            : "sin tarifa definida";
-        await notifyTeam(
-          `📍 Lead en ZIP ${zipToCheck} — sin técnico propio, subcontratista disponible:\n` +
-          `  👤 Lead: ${leadName} | 📞 ${leadPhone} | Servicio: ${leadService}\n` +
-          `  🔧 Subcontratista: ${subTech.name}${subTech.phone ? ` (${subTech.phone})` : ""} — ${fee}\n` +
-          `  ➡️ Contacta al subcontratista y pasa los datos del lead.`,
-          "coverage_sub",
-        );
-      } else if (!ownTech && !subTech) {
-        // No coverage at all
-        await notifyTeam(
-          `🚨 Lead en ZIP ${zipToCheck} — sin cobertura:\n` +
-          `  👤 ${leadName} | 📞 ${leadPhone} | Servicio: ${leadService}\n` +
-          `  ⚠️ No tienes técnico ni subcontratista para esta zona. El bot sigue calificando.`,
-          "coverage_none",
-        );
-      }
-      // own tech → no alert, normal flow
-
-      // Mark alerted so this check doesn't repeat for the same lead
-      await sql`UPDATE fadc.leads SET coverage_alerted = true WHERE id = ${lead.id}`;
-    }
-
     out.reply = scrubFillers(stripDashes(out.reply));
 
     const L = out.lead;
@@ -2187,6 +2136,47 @@ async function processInbound(input: {
           : "The customer has been CONFIRMED for this slot. Assign a tech, or reschedule them if nobody is free."),
         "appointment",
       );
+
+      // \u2500\u2500 Coverage check at ticket-ready \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+      // Only fires when a full ticket exists (stage just became ready_to_confirm).
+      // At this point the lead is real money \u2014 check who can take the job.
+      if (!lead.coverage_alerted) {
+        const ticketZip = String((L.zip ?? null) || (lead.zip as string | null) || "").trim();
+        if (ticketZip && /^\d{5}$/.test(ticketZip)) {
+          type TechRow = { name: string; type: string; phone: string | null; split_pct: number | null; flat_fee: number | null };
+          const techs = await sql<TechRow[]>`
+            SELECT name, type, phone, split_pct, flat_fee
+            FROM fadc.technicians
+            WHERE active = true
+              AND ${ticketZip} = ANY(coverage_zips)
+            ORDER BY type
+          `;
+          const ownTech = techs.find((t) => t.type === "own");
+          const subTech = techs.find((t) => t.type === "subcontractor");
+
+          if (!ownTech && subTech) {
+            const fee = subTech.flat_fee != null
+              ? `tarifa fija $${subTech.flat_fee}`
+              : subTech.split_pct != null
+                ? `${subTech.split_pct}% del cierre`
+                : "sin tarifa definida";
+            await notifyTeam(
+              `\uD83D\uDCCB ZIP ${ticketZip} \u2014 sin t\u00E9cnico propio. Subcontratista disponible:\n` +
+              `  \uD83D\uDD27 ${subTech.name}${subTech.phone ? ` (${subTech.phone})` : ""} \u2014 ${fee}\n` +
+              `  \u27A1\uFE0F Pasa el ticket de arriba a ${subTech.name} para que lo trabaje.`,
+              "coverage_sub",
+            );
+          } else if (!ownTech && !subTech) {
+            await notifyTeam(
+              `\uD83D\uDEA8 ZIP ${ticketZip} \u2014 sin cobertura. Ticket listo pero sin t\u00E9cnico ni subcontratista.\n` +
+              `  \u27A1\uFE0F Consigue alguien para esta zona o contacta un broker.`,
+              "coverage_none",
+            );
+          }
+          // own tech \u2192 no alert needed
+          await sql`UPDATE fadc.leads SET coverage_alerted = true WHERE id = ${leadId}`;
+        }
+      }
     } else if (out.needs_human === true && !specificAlert) {
       // Only when no net already sent its own, more specific alert. Twenty alerts in six
       // minutes buried the one that carried a real booking, so every duplicate alert costs attention.
