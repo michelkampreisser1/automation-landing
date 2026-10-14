@@ -1311,6 +1311,47 @@ async function sendTypingOn(recipientId: string) {
   } catch (_) { /* typing indicator is best-effort */ }
 }
 
+// PSID RESOLUTION (found 14 oct). Meta assigns different PSIDs to the same person
+// depending on the entry point: ad click vs Business Suite thread vs comment reply.
+// James Froio had PSID A from his ad click and PSID B when Michel messaged him from
+// Business Suite. The system created two separate leads and lost the entire conversation.
+// This helper checks messenger_id first, then alt_messenger_ids, then profile name.
+// When a match is found by alt or name, it adds the new PSID to alt_messenger_ids.
+async function resolveLeadByPsid(
+  psid: string,
+  profileName?: { first_name: string | null; last_name: string | null } | null,
+): Promise<{ id: string; first_name: string | null } | null> {
+  // 1. Direct match on messenger_id
+  const [byMain] = await sql`select id, first_name from fadc.leads where messenger_id = ${psid}`;
+  if (byMain) return byMain;
+  // 2. Match on alt_messenger_ids
+  const [byAlt] = await sql`select id, first_name, messenger_id from fadc.leads where ${psid} = ANY(alt_messenger_ids)`;
+  if (byAlt) return byAlt;
+  // 3. Match by profile name (only if we have a first + last name, and the lead was created recently)
+  if (profileName?.first_name && profileName?.last_name) {
+    const [byName] = await sql`
+      select id, first_name, messenger_id from fadc.leads
+      where first_name = ${profileName.first_name}
+        and last_name = ${profileName.last_name}
+        and created_at > now() - interval '30 days'
+        and stage not in ('closed', 'merged', 'misclick')
+      order by last_inbound_at desc nulls last
+      limit 1`;
+    if (byName) {
+      // Found by name — register this PSID as an alias
+      await sql`update fadc.leads
+        set alt_messenger_ids = array_append(alt_messenger_ids, ${psid})
+        where id = ${byName.id} and not (${psid} = ANY(alt_messenger_ids))`;
+      await notifyTeam(
+        `🔗 PSID duplicado detectado para ${byName.first_name}. Nuevo PSID ${psid.slice(-6)} vinculado al lead existente.`,
+        "psid_merge",
+      );
+      return byName;
+    }
+  }
+  return null;
+}
+
 // Handle echo events: when Michel (or any human) sends a message from the
 // Business Suite inbox, Meta fires a webhook with message.is_echo = true.
 // We detect this and pause the agent so the bot doesn't reply on top.
@@ -1335,7 +1376,17 @@ async function handleEcho(ev: Record<string, any>): Promise<void> {
     // Michel commented as a test, already had a lead row from earlier chats, and the bot's own
     // opener echoed back as "a person replied", pausing him.
     if (body.includes("Thanks for your comment on our ad")) return;
-    let [lead] = await sql`select id, first_name from fadc.leads where messenger_id = ${customerId}`;
+    // Try to resolve this PSID to an existing lead (checks messenger_id, alt_messenger_ids,
+    // and profile name). This prevents the duplicate-PSID bug found 14 oct with James Froio.
+    let profile: { first_name: string | null; last_name: string | null } | null = null;
+    let lead = await resolveLeadByPsid(customerId);
+    if (!lead) {
+      // No match by PSID — try profile name before creating a new lead
+      try { profile = await getMessengerProfile(customerId); } catch (_) { /* best-effort */ }
+      if (profile?.first_name) {
+        lead = await resolveLeadByPsid(customerId, profile);
+      }
+    }
     if (!lead) {
       // THE OLD-THREAD GAP (found 6 oct). A person can write by hand to someone who talked to
       // the page before the bot existed. That customer has no lead row yet, so this used to
@@ -1443,9 +1494,20 @@ async function processAttachment(input: {
   const t0 = Date.now();
   let leadId: string | null = null;
   try {
+    // Resolve PSID to existing lead (duplicate-PSID fix, 14 oct)
+    const resolved = await resolveLeadByPsid(
+      messengerId,
+      firstName && lastName ? { first_name: firstName, last_name: lastName } : null,
+    );
+    let effectiveMessengerId = messengerId;
+    if (resolved) {
+      const [check] = await sql`select messenger_id from fadc.leads where id = ${resolved.id} and messenger_id != ${messengerId}`;
+      if (check) effectiveMessengerId = check.messenger_id;
+    }
+
     const [lead] = await sql`
       insert into fadc.leads (messenger_id, manychat_id, first_name, last_name, last_inbound_at)
-      values (${messengerId}, ${messengerId}, ${firstName}, ${lastName}, now())
+      values (${effectiveMessengerId}, ${effectiveMessengerId}, ${firstName}, ${lastName}, now())
       on conflict (messenger_id) do update
         set last_inbound_at = now(),
             first_name = coalesce(fadc.leads.first_name, excluded.first_name),
@@ -1453,6 +1515,13 @@ async function processAttachment(input: {
       returning id, stage, agent_paused, first_name, service, zip, town, phone,
                 preferred_day, preferred_window, address`;
     leadId = lead.id;
+
+    // Register alt PSID if different from primary
+    if (effectiveMessengerId !== messengerId) {
+      await sql`update fadc.leads
+        set alt_messenger_ids = array_append(alt_messenger_ids, ${messengerId})
+        where id = ${lead.id} and not (${messengerId} = ANY(alt_messenger_ids))`;
+    }
     setCtxLead(leadId);
 
     if (metaMid) {
@@ -1522,10 +1591,26 @@ async function processInbound(input: {
   let leadId: string | null = null;
   let inboundId: string | null = null;
   try {
-    // 1. Upsert lead
+    // 1. Resolve PSID — check if this messenger ID already maps to a lead via alt_messenger_ids
+    // or profile name (prevents duplicate-PSID bug found 14 oct with James Froio).
+    // resolveLeadByPsid checks: (a) messenger_id direct, (b) alt_messenger_ids, (c) profile name.
+    // For (a) it returns immediately — the upsert's ON CONFLICT handles it with no extra query.
+    // For (b)/(c) we need the lead's primary messenger_id so the upsert hits the same row.
+    const resolved = await resolveLeadByPsid(
+      messengerId,
+      firstName && lastName ? { first_name: firstName, last_name: lastName } : null,
+    );
+    let effectiveMessengerId = messengerId;
+    if (resolved) {
+      // Check if the match was via alt or name (not direct messenger_id match)
+      const [check] = await sql`select messenger_id from fadc.leads where id = ${resolved.id} and messenger_id != ${messengerId}`;
+      if (check) effectiveMessengerId = check.messenger_id;
+    }
+
+    // 2. Upsert lead (using resolved messenger_id to avoid creating duplicate)
     const [lead] = await sql`
       insert into fadc.leads (messenger_id, manychat_id, first_name, last_name, last_inbound_at)
-      values (${messengerId}, ${messengerId}, ${firstName}, ${lastName}, now())
+      values (${effectiveMessengerId}, ${effectiveMessengerId}, ${firstName}, ${lastName}, now())
       on conflict (messenger_id) do update
         set last_inbound_at = now(),
             first_name = coalesce(fadc.leads.first_name, excluded.first_name),
@@ -1534,6 +1619,13 @@ async function processInbound(input: {
                 service, zip, town, phone, preferred_day, preferred_window, address,
                 offered_day, offered_window, declined_slots, coverage_alerted`;
     leadId = lead.id;
+
+    // If this PSID is different from the lead's primary, register it as an alt
+    if (effectiveMessengerId !== messengerId) {
+      await sql`update fadc.leads
+        set alt_messenger_ids = array_append(alt_messenger_ids, ${messengerId})
+        where id = ${lead.id} and not (${messengerId} = ANY(alt_messenger_ids))`;
+    }
     setCtxLead(leadId);
 
     // 2. Save inbound (dedup on Meta message id so retries don't double-reply)
