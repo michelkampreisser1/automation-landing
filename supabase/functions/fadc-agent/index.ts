@@ -1532,7 +1532,7 @@ async function processInbound(input: {
             last_name  = coalesce(fadc.leads.last_name,  excluded.last_name)
       returning id, stage, agent_paused, needs_human, first_name, soft_close_used, name_asked,
                 service, zip, town, phone, preferred_day, preferred_window, address,
-                offered_day, offered_window, declined_slots`;
+                offered_day, offered_window, declined_slots, coverage_alerted`;
     leadId = lead.id;
     setCtxLead(leadId);
 
@@ -1843,6 +1843,57 @@ async function processInbound(input: {
     const newZip = out.lead.zip && !lead.zip ? String(out.lead.zip) : null;
     if (newZip && /^\d{5}$/.test(newZip) && !isCoreZip(newZip)) {
       await notifyTeam(`\u{1F4CD} ZIP ${newZip} is outside MA/CT/RI (${lead.first_name ?? messengerId}). The agent is still collecting, line up a crew for this area.`, "area");
+    }
+
+    // ── Technician coverage check ────────────────────────────────────────────
+    // Runs once per lead when a valid ZIP first arrives. Checks fadc.technicians
+    // to see who, if anyone, covers this ZIP. Alerts Michel so he can act:
+    //   • own tech → normal, no alert needed (they take it through regular flow)
+    //   • subcontractor only → alert to route the lead to that subcontractor
+    //   • no coverage → alert to find someone or recruit for that zone
+    const zipToCheck = newZip ?? (out.lead.zip && !lead.coverage_alerted ? String(out.lead.zip) : null);
+    if (zipToCheck && /^\d{5}$/.test(zipToCheck) && !lead.coverage_alerted) {
+      type TechRow = { name: string; type: string; phone: string | null; split_pct: number | null; flat_fee: number | null };
+      const techs = await sql<TechRow[]>`
+        SELECT name, type, phone, split_pct, flat_fee
+        FROM fadc.technicians
+        WHERE active = true
+          AND ${zipToCheck} = ANY(coverage_zips)
+        ORDER BY type  -- 'own' before 'subcontractor'
+      `;
+      const ownTech = techs.find((t) => t.type === "own");
+      const subTech = techs.find((t) => t.type === "subcontractor");
+      const leadName = (out.lead.first_name ?? lead.first_name ?? "Lead sin nombre") as string;
+      const leadPhone = (out.lead.phone ?? lead.phone ?? "sin teléfono") as string;
+      const leadService = (out.lead.service ?? lead.service ?? "sin servicio") as string;
+
+      if (!ownTech && subTech) {
+        // Covered only by a subcontractor — route to them
+        const fee = subTech.flat_fee != null
+          ? `tarifa fija $${subTech.flat_fee}`
+          : subTech.split_pct != null
+            ? `${subTech.split_pct}% del cierre`
+            : "sin tarifa definida";
+        await notifyTeam(
+          `📍 Lead en ZIP ${zipToCheck} — sin técnico propio, subcontratista disponible:\n` +
+          `  👤 Lead: ${leadName} | 📞 ${leadPhone} | Servicio: ${leadService}\n` +
+          `  🔧 Subcontratista: ${subTech.name}${subTech.phone ? ` (${subTech.phone})` : ""} — ${fee}\n` +
+          `  ➡️ Contacta al subcontratista y pasa los datos del lead.`,
+          "coverage_sub",
+        );
+      } else if (!ownTech && !subTech) {
+        // No coverage at all
+        await notifyTeam(
+          `🚨 Lead en ZIP ${zipToCheck} — sin cobertura:\n` +
+          `  👤 ${leadName} | 📞 ${leadPhone} | Servicio: ${leadService}\n` +
+          `  ⚠️ No tienes técnico ni subcontratista para esta zona. El bot sigue calificando.`,
+          "coverage_none",
+        );
+      }
+      // own tech → no alert, normal flow
+
+      // Mark alerted so this check doesn't repeat for the same lead
+      await sql`UPDATE fadc.leads SET coverage_alerted = true WHERE id = ${lead.id}`;
     }
 
     out.reply = scrubFillers(stripDashes(out.reply));
