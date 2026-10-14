@@ -2361,9 +2361,10 @@ const FOLLOWUP_INSTRUCTION = (r: FollowupRow, hours: number, slot: string | null
   if (!r.address) missing.push("their street address");
 
   const first = r.followup_count === 0;
+  const nudgeLabel = first ? "FIRST" : r.followup_count === 1 ? "SECOND" : "THIRD and FINAL";
   return `(Internal note, NOT from the customer. Never quote or mention it.
 
-They went quiet about ${hours} hours ago, right after your last message. Write ONE short follow-up, the ${first ? "FIRST" : "SECOND and FINAL"} nudge.
+They went quiet about ${hours} hours ago, right after your last message. Write ONE short follow-up, the ${nudgeLabel} nudge.
 
 What you already know about this specific person:
 ${known.length ? known.map((k) => "- " + k).join("\n") : "- almost nothing yet, they barely wrote"}
@@ -2376,7 +2377,7 @@ Rules for this one message:
 4. Max 30 words. One or two sentences.
 5. TOWN RULE: If you know their ZIP code but NOT their town name, write "ZIP [number]" or leave the location out entirely. NEVER guess or infer a city name from a ZIP code — you will get it wrong and it will look creepy. Only use the town name if it was explicitly stated in the conversation.
 6. BANNED openers and fillers, in any form: "just checking", "just checking in", "checking in", "checking back", "following up", "circling back", "touching base", "wanted to see if", "hope you're well", "hope this finds you", "good morning or afternoon", "good morning/afternoon", "morning or afternoon". Also banned: any time-of-day greeting you can't be certain of ("Good morning", "Good afternoon", "Good evening") — you don't know when they'll read it, so it will be wrong. Use a neutral opener tied to their name and the concrete detail instead. These are the tell that a message is automated. If your draft contains any of them, rewrite it. No apology, no emojis, no pressure.
-${first ? "" : "7. This is the LAST time you write to them. Keep it warm and make it easy to either say yes or let it go, no urgency, no guilt.\n"}
+${first ? "" : r.followup_count === 1 ? "7. This is the second nudge. Try a different angle from the first: offer a choice (mornings or afternoons? this week or next?), mention no deposit needed, or highlight something specific about their situation. Keep it warm.\n" : "7. This is the LAST time you write to them. It's been two days. Keep it warm, brief, and make it easy to either say yes or let it go. No urgency, no guilt. Something like 'no worries if the timing changed' gives them a graceful out while leaving the door open.\n"}
 If the conversation shows they already said no, booked elsewhere, or are not a customer, return an empty reply.
 Return the same JSON format as always; leave the lead fields as they are.)`;
 };
@@ -2627,11 +2628,12 @@ async function runFollowups(dryRun: boolean): Promise<Record<string, unknown>> {
         or last_inbound_at - last_outbound_at < interval '5 minutes'
       )
       and (no_followup_until is null or no_followup_until <= now())
-      and last_inbound_at > now() - interval '23 hours 30 minutes'
+      and last_inbound_at > now() - interval '72 hours'
       and messenger_id ~ '^[0-9]{8,}$'
       and (
         (followup_count = 0 and last_inbound_at < now() - interval '3 hours')
         or (followup_count = 1 and last_inbound_at < now() - interval '20 hours')
+        or (followup_count = 2 and last_inbound_at < now() - interval '48 hours')
       )
     order by last_inbound_at asc
     limit 20`;
@@ -2726,9 +2728,9 @@ async function runFollowups(dryRun: boolean): Promise<Record<string, unknown>> {
       results.push({ lead: r.first_name ?? r.messenger_id, nudge: r.followup_count + 1, sent: reply });
       // v74: Messenger closes the door 24 h after their last message. After the final nudge the
       // only channel left is the phone, so a lead with a number gets handed to a person to call.
-      if (r.followup_count + 1 >= 2 && r.phone) {
+      if (r.followup_count + 1 >= 3 && r.phone) {
         await notifyTeam(
-          `\u{1F4DE} CALL ${r.first_name ?? "this lead"} at ${r.phone}. Last chat nudge sent, Messenger closes in ~4 h. ` +
+          `\u{1F4DE} CALL ${r.first_name ?? "this lead"} at ${r.phone}. Third and final nudge sent, 48h since last reply. ` +
           `${[r.service, r.town, r.zip].filter(Boolean).join(", ")}`,
           "window_closing",
         );
