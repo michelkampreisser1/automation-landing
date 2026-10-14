@@ -2242,7 +2242,7 @@ Rules for this one message:
 3. Ask for exactly ONE thing: ${missing[0] ?? "confirming the slot"}.${(!r.preferred_day && slot) ? `\n   Do NOT ask "what day works for you". OFFER this exact slot and ask them to confirm it: ${slot}. A yes/no is a much smaller ask than inventing a date, and every lead we lost died on the open question.` : ""}
 4. Max 30 words. One or two sentences.
 5. TOWN RULE: If you know their ZIP code but NOT their town name, write "ZIP [number]" or leave the location out entirely. NEVER guess or infer a city name from a ZIP code — you will get it wrong and it will look creepy. Only use the town name if it was explicitly stated in the conversation.
-6. BANNED openers and fillers, in any form: "just checking", "just checking in", "checking in", "checking back", "following up", "circling back", "touching base", "wanted to see if", "hope you're well", "hope this finds you". These are the tell that a message is automated. If your draft contains any of them, rewrite it. No apology, no emojis, no pressure.
+6. BANNED openers and fillers, in any form: "just checking", "just checking in", "checking in", "checking back", "following up", "circling back", "touching base", "wanted to see if", "hope you're well", "hope this finds you", "good morning or afternoon", "good morning/afternoon", "morning or afternoon". Also banned: any time-of-day greeting you can't be certain of ("Good morning", "Good afternoon", "Good evening") — you don't know when they'll read it, so it will be wrong. Use a neutral opener tied to their name and the concrete detail instead. These are the tell that a message is automated. If your draft contains any of them, rewrite it. No apology, no emojis, no pressure.
 ${first ? "" : "7. This is the LAST time you write to them. Keep it warm and make it easy to either say yes or let it go, no urgency, no guilt.\n"}
 If the conversation shows they already said no, booked elsewhere, or are not a customer, return an empty reply.
 Return the same JSON format as always; leave the lead fields as they are.)`;
@@ -2255,7 +2255,7 @@ Return the same JSON format as always; leave the lead fields as they are.)`;
 const BANNED_FOLLOWUP_RE =
   // "circle back" slipped through on 5 oct because only "circling back" was listed. Every one
   // of these needs all its forms, or the filter is decoration.
-  /\b(just checking|checking in|checking back|check(ing)? back in|follow(ing|ed)? up|circl(e|es|ed|ing) back|touch(ing|ed)? base|reach(ing|ed)? out again|wanted to see if|wanted to check|hope you'?re well|hope this (email )?finds you|bumping this|friendly reminder)\b/i;
+  /\b(just checking|checking in|checking back|check(ing)? back in|follow(ing|ed)? up|circl(e|es|ed|ing) back|touch(ing|ed)? base|reach(ing|ed)? out again|wanted to see if|wanted to check|hope you'?re well|hope this (email )?finds you|bumping this|friendly reminder|good morning or afternoon|morning or afternoon|good (morning|afternoon|evening)\b)/i;
 
 // v73: the ad that started the conversation. First ad wins; a later ad click only fills a blank.
 async function saveAdRef(messengerId: string, adId: string, adTitle: string | null) {
