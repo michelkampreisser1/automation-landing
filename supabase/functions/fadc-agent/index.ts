@@ -1175,23 +1175,43 @@ async function notifyTeamFor(leadId: string, text: string, kind: string) {
 }
 
 // Send a text message back to the customer through the Messenger Send API.
-async function sendMessengerReply(recipientId: string, text: string) {
+async function sendMessengerReply(recipientId: string, text: string, tag?: string) {
   if (!META_PAGE_TOKEN || !text) return;
   if (!BOT_LIVE_MODE) {
     // Kill-switch is OFF: log what WOULD have been sent, but never actually send it.
     await notifyTeam(`🧪 [TEST MODE, not sent] Would reply to lead:\n"${text}"`, "test_mode");
     return;
   }
+  const payload: Record<string, unknown> = {
+    recipient: { id: recipientId },
+    messaging_type: tag ? "MESSAGE_TAG" : "RESPONSE",
+    message: { text },
+  };
+  if (tag) payload.tag = tag;
   const res = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/me/messages?access_token=${META_PAGE_TOKEN}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      recipient: { id: recipientId },
-      messaging_type: "RESPONSE",
-      message: { text },
-    }),
+    body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(`send api ${res.status}: ${await res.text()}`);
+}
+
+// Meta closes the free-form 24h window after the customer's last message. A reschedule or
+// appointment-change notice is still allowed outside that window under the CONFIRMED_EVENT_UPDATE
+// tag — Meta's exception for messages about an existing booking. Try a normal reply first (cheapest,
+// no restrictions on content); only fall back to the tag when the window is actually closed, since
+// tagged sends are policy-restricted to genuine appointment updates.
+async function sendAppointmentUpdate(recipientId: string, text: string) {
+  try {
+    await sendMessengerReply(recipientId, text);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/cannot send messages to this id|outside of allowed window|24 hour/i.test(msg)) {
+      await sendMessengerReply(recipientId, text, "CONFIRMED_EVENT_UPDATE");
+    } else {
+      throw err;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -3528,7 +3548,7 @@ async function handle(req: Request): Promise<Response> {
     try {
       await sql`update fadc.leads set agent_paused = true, assigned_to = coalesce(assigned_to, 'Michel'), taken_at = coalesce(taken_at, now()) where id = ${lead.id}`;
       await sql`insert into fadc.messages (lead_id, role, text, sent_by) values (${lead.id}, 'agent', ${text}, 'human')`;
-      await sendMessengerReply(lead.messenger_id, text);
+      await sendAppointmentUpdate(lead.messenger_id, text);
       await sql`update fadc.leads set last_outbound_at = now(), updated_at = now() where id = ${lead.id}`;
       return json(200, { ok: true, lead: lead.first_name });
     } catch (err) {
