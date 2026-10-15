@@ -2655,7 +2655,7 @@ async function runTicketSweep(dryRun: boolean): Promise<Record<string, unknown>>
     first_name: string | null; last_name: string | null; phone: string | null;
     lead_address: string | null; lead_service: string | null; call_after: string | null;
   }[]>`
-    select a.id, a.lead_id, a.service, a.address, a.slot_date, a.slot_window,
+    select a.id, a.lead_id, a.service, a.address, a.slot_date::text as slot_date, a.slot_window,
            a.exact_window, a.notes, a.tech,
            l.first_name, l.last_name, l.phone,
            l.address as lead_address, l.service as lead_service, l.call_after
