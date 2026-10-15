@@ -3513,6 +3513,30 @@ async function handle(req: Request): Promise<Response> {
     }
   }
 
+  // --- Manual send (Michel, via x-fadc-cron — used when the CRM phone app isn't handy).
+  // Sends as the Page, pauses the bot on that lead (so it doesn't talk over a human), and
+  // logs the message as sent_by 'human' exactly like the CRM "send" action does. ---
+  if (body.action === "manual_send") {
+    const byCron = await cronSecretOk(req.headers.get("x-fadc-cron"));
+    if (!byCron) return json(401, { error: "unauthorized" });
+    const text = String(body.text ?? "").trim();
+    const leadId = String(body.lead_id ?? "");
+    if (!text || text.length > 1900 || !leadId) return json(400, { error: "lead_id and text required" });
+    const [lead] = await sql`select id, messenger_id, first_name from fadc.leads where id = ${leadId}::uuid`;
+    if (!lead?.messenger_id) return json(404, { error: "no lead or no messenger_id" });
+    setCtxLead(lead.id);
+    try {
+      await sql`update fadc.leads set agent_paused = true, assigned_to = coalesce(assigned_to, 'Michel'), taken_at = coalesce(taken_at, now()) where id = ${lead.id}`;
+      await sql`insert into fadc.messages (lead_id, role, text, sent_by) values (${lead.id}, 'agent', ${text}, 'human')`;
+      await sendMessengerReply(lead.messenger_id, text);
+      await sql`update fadc.leads set last_outbound_at = now(), updated_at = now() where id = ${lead.id}`;
+      return json(200, { ok: true, lead: lead.first_name });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return json(500, { ok: false, error: msg });
+    }
+  }
+
   // --- Follow-up runner (pg_cron via x-fadc-cron, or Michel via x-fadc-secret) ---
   if (body.action === "followups") {
     const bySecret = !!WEBHOOK_SECRET && req.headers.get("x-fadc-secret") === WEBHOOK_SECRET;
