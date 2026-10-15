@@ -2871,7 +2871,7 @@ async function runFollowups(dryRun: boolean): Promise<Record<string, unknown>> {
         continue;
       }
       // Row first, send second, so the echo of this very message always finds its own record.
-      await sql`insert into fadc.messages (lead_id, role, text, sent_by) values (${r.id}, 'agent', ${reply}, 'followup')`;
+      const [fuMsgRow] = await sql`insert into fadc.messages (lead_id, role, text, sent_by) values (${r.id}, 'agent', ${reply}, 'followup') returning id`;
       await sendMessengerReply(r.messenger_id, reply);
       // A nudge that offers a slot records it, so a one-word yes books THAT slot. On 6 oct the
       // 4pm nudge to 08816 offered Wednesday while the lead still held Tuesday from an older offer.
@@ -2898,6 +2898,28 @@ async function runFollowups(dryRun: boolean): Promise<Record<string, unknown>> {
         await sql`insert into fadc.agent_runs (lead_id, inbound_text, model, error, latency_ms)
           values (${r.id}, '[followup]', ${MODEL}, ${msg}, ${Date.now() - t0})`;
       } catch (_) { /* ignore */ }
+      // Meta permanently refuses some recipient IDs ("(#100) cannot send messages to this id") —
+      // blocked/unsubscribed/stale conversation. That message row inserted above never actually
+      // went out, so mark it failed rather than leaving a ghost "sent" record. And without this,
+      // the lead matches the same followup query again next run forever (followup_count never
+      // advances past the throw) — Maryjane Docchio hit this 22 times in a row with nobody told.
+      // Stop retrying and hand it to a person once, instead of silently forever.
+      if (/cannot send messages to this id/i.test(msg)) {
+        try {
+          await sql`update fadc.messages set sent_by = 'followup_failed', text = '[NOT SENT] ' || text where id = ${fuMsgRow?.id ?? null}`;
+        } catch (_) { /* ignore */ }
+        const [lead] = await sql`select needs_human from fadc.leads where id = ${r.id}`;
+        await sql`update fadc.leads set needs_human = true, agent_paused = true, updated_at = now() where id = ${r.id}`;
+        if (!lead?.needs_human) {
+          await notifyTeam(
+            `\u{1F6AB} Can't reach ${r.first_name ?? "this lead"} on Messenger — Meta is permanently refusing delivery ` +
+            `(blocked, unsubscribed, or a stale conversation). Bot has stopped retrying.\n` +
+            (r.phone ? `\u{1F4DE} Call them at ${r.phone}.` : "No phone on file — no other way to reach them.") + "\n" +
+            `${[r.service, r.town, r.zip].filter(Boolean).join(", ")}`,
+            "undeliverable",
+          );
+        }
+      }
       results.push({ lead: r.first_name ?? r.messenger_id, error: msg.slice(0, 200) });
     }
   }
