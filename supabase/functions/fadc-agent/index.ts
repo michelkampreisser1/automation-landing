@@ -2964,8 +2964,11 @@ async function handleCrm(auth: string | null, b: Record<string, any>): Promise<{
     });
     await sql`update fadc.appointments set notes = ${ticket}, updated_at = now() where id = ${a.id}`;
     const status = String(a.status);
-    const head = status === "cancelled" ? "❌ TICKET CANCELLED" : status === "done" ? "✅ JOB DONE"
-      : status === "no_show" ? "⚠️ NO-SHOW" : "✏️ TICKET CHANGED";
+    const outcome = String(a.outcome_reason ?? "");
+    const head = /no_show/.test(outcome) ? "⚠️ NO-SHOW"
+      : status === "cancelled" ? "❌ TICKET CANCELLED"
+      : status === "completed" ? "✅ JOB DONE"
+      : "✏️ TICKET CHANGED";
     const extra = [a.tech ? `Tech: ${a.tech}` : "Tech: NOT ASSIGNED", `Status: ${status}`, b.note ? String(b.note) : ""].filter(Boolean).join("\n");
     await notifyTeam(`${head} (by ${me.name})\n\n${ticket}\n\n${extra}`, "ticket_update");
     return { status: 200, body: { ok: true, ticket } };
@@ -3028,12 +3031,14 @@ const CLOSEOUT_LABELS: Record<CloseoutOutcome, string> = {
   rescheduled: "\u{1F501} Rescheduled",
 };
 
-// Keeps the CRM's existing status vocabulary (done / no_show / cancelled / rescheduled);
-// outcome_reason carries the finer distinction the CRM never had.
+// fadc.appointments has a check constraint allowing only:
+// pending / confirmed / completed / cancelled / rescheduled — there is no "done" or
+// "no_show" value, so those used to throw a constraint violation and silently fail
+// to close the appointment. outcome_reason carries the finer distinction instead.
 const CLOSEOUT_STATUS: Record<CloseoutOutcome, string> = {
-  done: "done",
-  tech_no_show: "no_show",
-  customer_no_show: "no_show",
+  done: "completed",
+  tech_no_show: "cancelled",
+  customer_no_show: "cancelled",
   customer_cancelled: "cancelled",
   rescheduled: "rescheduled",
 };
