@@ -1618,7 +1618,8 @@ async function processInbound(input: {
             last_name  = coalesce(fadc.leads.last_name,  excluded.last_name)
       returning id, stage, agent_paused, needs_human, first_name, soft_close_used, name_asked,
                 service, zip, town, phone, preferred_day, preferred_window, address,
-                offered_day, offered_window, declined_slots, coverage_alerted`;
+                offered_day, offered_window, declined_slots, coverage_alerted,
+                review_followup_at, review_requested`;
     leadId = lead.id;
 
     // If this PSID is different from the lead's primary, register it as an alt
@@ -1661,6 +1662,39 @@ async function processInbound(input: {
         await notifyTeam(`💬 ${lead.first_name ?? "Lead"} replied (agent paused, needs a person):\n"${text}"`, "paused_reply");
       }
       return { reply: "", stage: lead.stage, needs_human: false, paused: true };
+    }
+
+    // 3b. REVIEW REPLY — the customer answered our "how did it go?" post-job message.
+    // Their reply resets Meta's 24h window so we can now send the review request with $20
+    // discount. This intercepts BEFORE the Claude call: no need to run the full agent for
+    // a fixed-copy thank-you + review link.
+    if (lead.review_followup_at && !lead.review_requested) {
+      const REVIEWS_LINK = "http://facebook.com/profile.php?id=61593572532326&sk=reviews";
+      const custTexts = (await sql`select text from fadc.messages where lead_id = ${leadId} and role = 'customer' order by created_at`).map((r: any) => r.text);
+      const reviewEs = isSpanish(custTexts.join("\n"));
+      // Check for negative sentiment — don't send a review request to someone who had a bad time
+      const NEG_RE = /\b(terrible|horrible|awful|bad|worst|disgusting|rip.?off|scam|complain|refund|disappointed|angry|furious|never again|no good|do not recommend|don.?t recommend|malo|p[eé]simo|horrible|asco|estafa|queja|reembolso|decepcionado|enojado|nunca m[aá]s)\b/i;
+      if (NEG_RE.test(text)) {
+        // Negative reply to "how did it go?" — escalate, don't ask for a review
+        await notifyTeam(
+          `⚠️ ${lead.first_name ?? "A customer"} had a BAD experience after their job.\nThey wrote: "${text.slice(0, 200)}"\n→ Reach out and fix this before it becomes a bad review.`,
+          "review_negative",
+        );
+        await sql`update fadc.leads set review_requested = true where id = ${leadId}`;
+        return { reply: "", stage: lead.stage, needs_human: true };
+      }
+      // Positive or neutral — send review request with $20 discount
+      const reviewReply = reviewEs
+        ? `¡Qué bueno saberlo! Si tienes un minuto, nos ayudaría mucho una reseña, así otras familias nos pueden encontrar. Como agradecimiento, te damos $20 de descuento en tu próximo servicio.\n\n${REVIEWS_LINK}`
+        : `So glad to hear that! If you have a minute, a quick review would mean a lot to us, it helps other families find us. And as a thank you, you'll get $20 off your next service!\n\n${REVIEWS_LINK}`;
+      await sql`insert into fadc.messages (lead_id, role, text, sent_by) values (${leadId}, 'agent', ${reviewReply}, 'review_request')`;
+      await sendMessengerReply(messengerId, reviewReply);
+      await sql`update fadc.leads set review_requested = true where id = ${leadId}`;
+      await notifyTeam(
+        `⭐ Review request sent to ${lead.first_name ?? "a customer"} ($20 discount). They said: "${text.slice(0, 120)}"`,
+        "review_sent",
+      );
+      return { reply: reviewReply, stage: lead.stage, needs_human: false };
     }
 
     // 4. History + typing indicator in parallel (speed: customer sees "typing..." immediately)
@@ -2607,6 +2641,46 @@ async function runLeakAlert(dryRun: boolean): Promise<Record<string, unknown>> {
   return { leaks: results.filter((x) => x.alerted).length, results };
 }
 
+// ── Review follow-ups ───────────────────────────────────────────────
+// Sends "How did everything go?" to customers whose appointment was
+// marked done 2-24h ago AND whose Meta 24h messaging window is still
+// open (last_inbound_at < 23h).  Their reply resets the window and
+// triggers the review-request intercept in processInbound.
+async function runReviewFollowups(dryRun: boolean): Promise<Record<string, unknown>> {
+  const rows = await sql<{ id: string; messenger_id: string; first_name: string | null; lead_id: string }[]>`
+    select a.id, l.messenger_id, l.first_name, l.id as lead_id
+    from fadc.appointments a
+    join fadc.leads l on l.id = a.lead_id
+    where a.outcome_reason = 'done'
+      and a.closed_at between now() - interval '24 hours' and now() - interval '2 hours'
+      and l.review_requested = false
+      and l.review_followup_at is null
+      and l.last_inbound_at > now() - interval '23 hours'
+      and l.messenger_id is not null
+  `;
+  if (rows.length === 0) return { ok: true, sent: 0, reason: "no eligible review leads" };
+
+  const results: Record<string, unknown>[] = [];
+  for (const r of rows) {
+    // Detect language from customer's message history
+    const msgs = (await sql`select text from fadc.messages where lead_id = ${r.lead_id} and role = 'customer' order by created_at`).map((m: any) => m.text);
+    const es = isSpanish(msgs.join("\n"));
+    const msg = es
+      ? `¡Hola${r.first_name ? ` ${r.first_name}` : ""}! ¿Cómo te fue con el servicio? Nos encantaría saber tu opinión 😊`
+      : `Hi${r.first_name ? ` ${r.first_name}` : ""}! How did everything go with the service? We'd love to hear your feedback 😊`;
+
+    if (dryRun) {
+      results.push({ lead_id: r.lead_id, name: r.first_name, would_send: msg });
+      continue;
+    }
+    await sql`insert into fadc.messages (lead_id, role, text, sent_by) values (${r.lead_id}, 'agent', ${msg}, 'review_followup')`;
+    await sendMessengerReply(r.messenger_id, msg);
+    await sql`update fadc.leads set review_followup_at = now() where id = ${r.lead_id}`;
+    results.push({ lead_id: r.lead_id, name: r.first_name, sent: true });
+  }
+  return { ok: true, sent: results.filter((x: any) => x.sent).length, results };
+}
+
 async function runFollowups(dryRun: boolean): Promise<Record<string, unknown>> {
   if (!dryRun && !insideFollowupHours()) {
     return { ok: true, sent: 0, reason: "outside business hours", boston: bostonNow() };
@@ -3391,9 +3465,11 @@ async function handle(req: Request): Promise<Response> {
       // a lead that qualified at 8pm should be on someone's phone that night, not at 9am.
       let leaks: Record<string, unknown> = {};
       try { leaks = await runLeakAlert(body.dry_run === true); } catch (e) { leaks = { error: e instanceof Error ? e.message : String(e) }; }
+      let reviewFollowups: Record<string, unknown> = {};
+      try { reviewFollowups = await runReviewFollowups(body.dry_run === true); } catch (e) { reviewFollowups = { error: e instanceof Error ? e.message : String(e) }; }
       const fu = await runFollowups(body.dry_run === true);
       await heartbeat("fadc_followups", true);
-      return json(200, { ...fu, resume, humanNudge, leaks });
+      return json(200, { ...fu, resume, humanNudge, leaks, reviewFollowups });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       await heartbeat("fadc_followups", false, msg);
