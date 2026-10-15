@@ -2455,12 +2455,16 @@ async function saveAdRef(messengerId: string, adId: string, adTitle: string | nu
             where messenger_id = ${messengerId}`;
 }
 
-// v73: THE ABANDONED CHAT. When someone on the team answers from the inbox the bot pauses so two
-// voices never talk over each other. On 8 oct ten chats sat over 3 hours: a person had stepped in,
-// the customer wrote back, and nobody answered. After 2 hours of silence on our side the bot picks
-// the conversation back up and guides it to the booking. Never for a ticket that is already
-// ready, a lead that needs a person (escalation, special pricing, a frustrated customer), or a
-// message that is a hazard or an escalation, and only inside Meta's 24 hour window.
+// v73/v80: THE ABANDONED CHAT. When someone on the team answers from the inbox the bot pauses so
+// two voices never talk over each other — but that pause used to be permanent until a human
+// manually un-paused it. On 8 oct ten chats sat over 3 hours: a person had stepped in, the
+// customer wrote back, and nobody answered; on 15 oct James/Aaron got auto-paused right after a
+// single manual message from Michel, with no way back without him remembering to un-pause. After
+// 10 minutes of silence on our side (checked every 10 min by cron — worst case ~20 min), the bot
+// picks the conversation back up and guides it to the booking, for ANY stage except one already
+// closed_lost or completed. Never for a lead that needs a person (escalation, special pricing, a
+// frustrated customer), or a message that is a hazard or an escalation, and only inside Meta's
+// 24 hour window.
 async function runResume(dryRun: boolean): Promise<Record<string, unknown>> {
   if (!dryRun && !insideFollowupHours()) return { resumed: 0, reason: "outside business hours" };
   const rows = await sql<{ id: string; messenger_id: string; first_name: string | null; last_text: string }[]>`
@@ -2470,10 +2474,10 @@ async function runResume(dryRun: boolean): Promise<Record<string, unknown>> {
                   where m.lead_id = l.id order by created_at desc limit 1) lm on true
     where l.agent_paused = true
       and l.needs_human = false
-      and l.stage in ('new', 'qualifying')
+      and l.stage not in ('closed_lost', 'completed')
       and l.messenger_id ~ '^[0-9]{8,}$'
       and lm.role = 'customer'
-      and lm.created_at < now() - interval '2 hours'
+      and lm.created_at < now() - interval '10 minutes'
       and lm.created_at > now() - interval '23 hours'
       and exists (select 1 from fadc.messages h where h.lead_id = l.id and h.sent_by = 'human')
     order by lm.created_at asc
@@ -2518,7 +2522,7 @@ async function runResume(dryRun: boolean): Promise<Record<string, unknown>> {
       await sql`insert into fadc.messages (lead_id, role, text, sent_by) values (${r.id}, 'agent', ${reply}, 'agent')`;
       await sql`update fadc.leads set agent_paused = false, last_outbound_at = now() where id = ${r.id}`;
       await notifyTeam(
-        `\u{1F501} ${r.first_name ?? "A lead"} waited 2h+ with no answer after a person stepped in. The bot picked it back up.\n` +
+        `\u{1F501} ${r.first_name ?? "A lead"} waited 10+ min with no answer after a person stepped in. The bot picked it back up.\n` +
         `They wrote: "${t.slice(0, 140)}"\nBot: "${reply.slice(0, 160)}"`,
         "resumed",
       );
@@ -2799,6 +2803,9 @@ async function runFollowups(dryRun: boolean): Promise<Record<string, unknown>> {
   const results: Array<Record<string, unknown>> = [];
   for (const r of rows) {
     const t0 = Date.now();
+    // Declared here (not inside the try) so the catch block below can still reach the row id
+    // if sendMessengerReply() throws after the insert — see the undeliverable-lead handling.
+    let fuMsgRow: { id: string } | undefined;
     try {
       const history = await sql`
         select role, text from fadc.messages where lead_id = ${r.id}
@@ -2872,7 +2879,7 @@ async function runFollowups(dryRun: boolean): Promise<Record<string, unknown>> {
         continue;
       }
       // Row first, send second, so the echo of this very message always finds its own record.
-      const [fuMsgRow] = await sql`insert into fadc.messages (lead_id, role, text, sent_by) values (${r.id}, 'agent', ${reply}, 'followup') returning id`;
+      [fuMsgRow] = await sql`insert into fadc.messages (lead_id, role, text, sent_by) values (${r.id}, 'agent', ${reply}, 'followup') returning id`;
       await sendMessengerReply(r.messenger_id, reply);
       // A nudge that offers a slot records it, so a one-word yes books THAT slot. On 6 oct the
       // 4pm nudge to 08816 offered Wednesday while the lead still held Tuesday from an older offer.

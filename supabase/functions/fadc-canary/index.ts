@@ -19,7 +19,7 @@ const TG_CHAT = Deno.env.get("TELEGRAM_CHAT_ID") ?? "";
 // Known cron jobs and their maximum allowed staleness (minutes since last_ok_at).
 // Generous padding over actual schedule so normal jitter doesn't fire false alarms.
 const JOBS: Record<string, number> = {
-  fadc_followups:        60,   // runs every 30 min → stale after 60 (45 was too tight, jitter caused false alerts)
+  fadc_followups:        25,   // runs every 10 min (was 30) → stale after 25, generous padding over schedule
   fadc_ad_spend:        300,   // runs every 4 h   → stale after 5 h
   fadc_closeout_ask:    180,   // runs at 21:00 & 22:00 → stale after 3 h (checked relative to last run)
   fadc_closeout_remind: 180,   // runs at 00:00 & 01:00 → stale after 3 h
