@@ -184,13 +184,16 @@ Then set stage to ready_to_confirm.
 
 ## Output format
 Return ONLY a JSON object, no prose, no code fences:
-{"reply":"<message to send, or empty string>","lead":{"first_name":null,"last_name":null,"service":null,"zip":null,"town":null,"phone":null,"preferred_day":null,"preferred_window":null,"address":null,"stage":"new|qualifying|ready_to_confirm|closed_lost|needs_human"},"needs_human":false,"handoff_summary":null,"job_type":null,"job_context":null}
+{"reply":"<message to send, or empty string>","lead":{"first_name":null,"last_name":null,"service":null,"zip":null,"town":null,"phone":null,"preferred_day":null,"preferred_window":null,"address":null,"stage":"new|qualifying|ready_to_confirm|closed_lost|needs_human"},"needs_human":false,"handoff_summary":null,"job_type":null,"job_context":null,"job_scale":null}
 Fill every lead field you know from the whole conversation (not just this message). handoff_summary is one line for the team when stage is ready_to_confirm or needs_human, e.g. "Chris - air ducts - 02135 - (617) 555-0134 - Tue 10-12 - 12 Main St Boston" or "Ruth asks about mold; needs a person".
 
 Two more fields, only when stage is ready_to_confirm:
 - job_type and job_context are ALWAYS written in English, even when the whole conversation is in Spanish. The technicians and the owner read the ticket, not the customer.
 - job_type: one short line naming the job the way a technician would read it, starting with the service. "Air duct cleaning \u2014 main heating duct system in a mobile home", "Dryer vent cleaning \u2014 second floor laundry". No price, no name, no address, no date.
-- job_context: anything the customer said that changes how the team treats this job or this customer, in one line. Who they are if it matters ("VP of a 144-unit mobile home park, potential for referrals"), access problems, pets, an elderly person at home. Leave it null when there is nothing. Never put the price, phone, address or date here.`;
+- job_context: anything the customer said that changes how the team treats this job or this customer, in one line. Who they are if it matters ("VP of a 144-unit mobile home park, potential for referrals"), access problems, pets, an elderly person at home. Leave it null when there is nothing. Never put the price, phone, address or date here.
+
+One more field, filled at ANY stage, the moment the customer says it, not only when the ticket is ready:
+- job_scale: how big the job is, in the customer's own words, written in English. Number of heating/AC systems, number of vents or registers, square footage, how long since the last cleaning, whether a dryer vent or chimney is also in play, more than one unit. "2 systems, never cleaned", "1 system + dryer vent", "8 registers, 3,000 sq ft". You already ask how many systems they have, so this is where that answer goes: write it down the moment they answer instead of dropping it. Leave it null until they actually say something about size, and never infer it from the town or the kind of house.`;
 
 type AgentOut = {
   reply: string;
@@ -199,6 +202,7 @@ type AgentOut = {
   handoff_summary: string | null;
   job_type?: string | null;
   job_context?: string | null;
+  job_scale?: string | null;
 };
 
 type ProcessResult = {
@@ -569,6 +573,7 @@ function buildTicket(f: {
   name: string | null; jobType: string | null; service: string | null;
   day: string | null; window: string | null; address: string | null;
   phone: string | null; context: string | null; callAfter?: string | null;
+  scale?: string | null;
 }): string {
   // Short on purpose. Afek and the techs read these on a phone between jobs, so the ticket
   // leads with WHEN (what a dispatcher sorts by), then the four facts needed to show up, then
@@ -591,6 +596,10 @@ function buildTicket(f: {
   ];
   // The extras only appear when there is something to say.
   const tail: string[] = [];
+  // Size goes on the ticket because the tech is the one who sells the add-ons, and he cannot
+  // sell what he does not know is there. A $99 base job does not pay for the ads; the vents,
+  // the second system and the sanitation do.
+  if (f.scale && f.scale.trim()) tail.push(`Size: ${f.scale.trim()}`);
   if (f.callAfter) tail.push(`Can take a call ${f.callAfter}.`);
   // Mike Lilla turned out to run a 144-unit park. Dropping that line to keep the ticket tidy
   // would have thrown away the referrals with it, so context survives the trim.
@@ -599,6 +608,27 @@ function buildTicket(f: {
   return lines.join("\n");
 }
 
+
+// v84 — SIZE IS THE WHOLE BUSINESS. Four jobs in five weeks: three at $150–$299 and one at
+// $1,282 (7 vents, sanitation, 2 UV lights). That single job is 66% of everything billed and
+// made the only profitable week we have had. A $99 base ticket cannot pay for $232 of weekly
+// ads at one job a week, so the ticket has to be bigger. The bot was already asking every
+// customer how many systems they had and throwing the answer away, which left nobody able to
+// tell a $99 lead from a $1,282 one until the tech was in the driveway. Now the answer is
+// kept (leads.job_scale), the big ones get a person on the phone the same hour, and the
+// ticket carries the size so the tech knows what is there to sell.
+const BIG_JOB_RE = new RegExp([
+  String.raw`\b([2-9]|[1-9]\d)\s*\+?\s*(systems?|units?|furnaces?|zones?|air handlers?)\b`,
+  String.raw`\b(two|three|four|five|six|seven|eight|nine|ten)\s+(systems?|units?|furnaces?|zones?)\b`,
+  String.raw`\b[1-9]\d\s*(vents?|registers?|ducts?|runs?)\b`,
+  String.raw`\bnever\s+(been\s+)?clean`,
+  String.raw`\b([2-9][,.]?\d{3}|\d{2},\d{3})\s*(sq|square)\b`,
+  String.raw`\bmulti[\s-]?(family|unit)\b`,
+  String.raw`\b(duplex|triplex|two[\s-]?family|three[\s-]?family)\b`,
+].join("|"), "i");
+function bigJob(scale: string | null | undefined): boolean {
+  return !!scale && BIG_JOB_RE.test(scale);
+}
 
 // ---------------------------------------------------------------------------------------
 // THE OPEN QUESTION. Every real lead died on the same sentence: "What day works best for
@@ -2211,8 +2241,29 @@ async function processInbound(input: {
                                                now() + (${holdHours ?? 0}::int * interval '1 hour')) end,
         name_asked       = ${nameAsked || lead.name_asked === true},
         handoff_summary  = coalesce(${out.handoff_summary ?? null}, handoff_summary),
+        job_scale        = coalesce(${out.job_scale ?? null}, job_scale),
         last_outbound_at = case when ${out.reply !== ""} then now() else last_outbound_at end
       where id = ${leadId}`;
+
+    // ── Big job on the line ──────────────────────────────────────────────────────────────
+    // Fires the moment the size is known, at whatever stage, because the point is to get a
+    // person on the phone while the customer is still in the chat. Michel is the one who
+    // closes, so this is addressed to him and goes out once per lead.
+    const scaleNow = String(out.job_scale ?? (lead.job_scale as string | null) ?? "").trim();
+    if (leadId && lead.value_alerted !== true && bigJob(scaleNow)) {
+      try {
+        await sql`update fadc.leads set value_alerted = true where id = ${leadId}`;
+        const who = (L.first_name ?? lead.first_name ?? "") as string;
+        const tel = (L.phone ?? lead.phone ?? "") as string;
+        await notifyTeamFor(leadId,
+          `\u{1F4B0} BIG JOB on the line${who ? ` — ${who}` : ""}\n` +
+          `Size: ${scaleNow}\n` +
+          (tel ? `\u{1F4DE} Call now: ${tel}\n` : "No phone yet — get it before they go quiet.\n") +
+          `${[L.service ?? lead.service, L.town ?? lead.town, L.zip ?? lead.zip].filter(Boolean).join(", ")}\n` +
+          `Close this one yourself. The multi-system jobs are the ones that pay for the week.`,
+          "big_job");
+      } catch (_) { /* an alert must never block the reply */ }
+    }
 
     // Save reply in parallel with lead update (both are independent writes)
     if (out.reply) {
@@ -2238,6 +2289,7 @@ async function processInbound(input: {
         phone: (L.phone ?? null) || (lead.phone as string | null),
         context: out.job_context ?? null,
         callAfter: callAfter ?? (lead.call_after as string | null),
+        scale: (out.job_scale ?? null) || (lead.job_scale as string | null),
       });
       try {
         const notes = ticket;
@@ -2666,6 +2718,59 @@ async function runLeakAlert(dryRun: boolean): Promise<Record<string, unknown>> {
   return { leaks: results.filter((x) => x.alerted).length, results };
 }
 
+// ── Amount chase ─────────────────────────────────────────────────────
+// v84 — REVENUE THAT IS NEVER RECORDED CANNOT BE MANAGED. The amount prompt went out exactly
+// once, right after the "Done" button was tapped. If nobody replied to it, the job's revenue
+// was lost for good: David Spirito's job on 15 oct was closed as done with ticket_amount null
+// and never reached closed_jobs, so it is missing from every weekly P&L number. With one
+// profitable week out of five, a job we forgot to price is not a rounding error. This asks
+// again once a day, up to five times, and then says plainly that the number is gone.
+async function runAmountChase(dryRun: boolean): Promise<Record<string, unknown>> {
+  if (!TG_TOKEN || !TG_CHAT) return { chased: 0, reason: "telegram not configured" };
+  const rows = await sql<{
+    id: string; address: string | null; lead_address: string | null;
+    first_name: string | null; last_name: string | null; amount_chases: number;
+  }[]>`
+    select a.id, a.address, l.address as lead_address, l.first_name, l.last_name, a.amount_chases
+    from fadc.appointments a join fadc.leads l on l.id = a.lead_id
+    where a.ticket_amount is null
+      and (a.outcome_reason = 'done' or a.status = 'completed')
+      and a.closed_at is not null
+      and a.closed_at > now() - interval '30 days'
+      and a.amount_chases < 5
+      and (a.amount_chased_at is null or a.amount_chased_at < now() - interval '20 hours')
+    order by a.closed_at
+    limit 5`;
+  if (rows.length === 0) return { chased: 0 };
+
+  const results: Record<string, unknown>[] = [];
+  for (const r of rows) {
+    const who = [r.first_name, r.last_name].filter(Boolean).join(" ") || "this customer";
+    const where = r.address ?? r.lead_address ?? "";
+    const last = r.amount_chases + 1 >= 5;
+    if (dryRun) { results.push({ id: r.id, who, try: r.amount_chases + 1 }); continue; }
+    try {
+      const p = await tgApi("sendMessage", {
+        chat_id: TG_CHAT,
+        text: `\u{1F4B5} Still missing the amount for ${who}${where ? ` (${where})` : ""}.\n` +
+          `This job is done but it counts as $0 in the weekly P&L until you reply with the number.\n` +
+          `Reply to THIS message with just the number (e.g. 249).` +
+          (last ? `\n\nThis is the last reminder for this job.` : ""),
+        reply_markup: { force_reply: true, selective: true },
+      });
+      await sql`update fadc.appointments
+                set amount_chased_at = now(), amount_chases = amount_chases + 1,
+                    amount_prompt_msg_id = ${p?.ok ? p.result.message_id : null},
+                    updated_at = now()
+                where id = ${r.id}`;
+      results.push({ id: r.id, who, try: r.amount_chases + 1, sent: !!p?.ok });
+    } catch (e) {
+      results.push({ id: r.id, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  return { chased: results.filter((x) => x.sent).length, results };
+}
+
 // ── Ticket sweep ────────────────────────────────────────────────────
 // Catches confirmed appointments that were booked by a human (CRM, Telegram, or
 // direct DB) and therefore never went through the bot's ready_to_confirm flow
@@ -2679,11 +2784,12 @@ async function runTicketSweep(dryRun: boolean): Promise<Record<string, unknown>>
     notes: string | null; tech: string | null;
     first_name: string | null; last_name: string | null; phone: string | null;
     lead_address: string | null; lead_service: string | null; call_after: string | null;
+    job_scale: string | null;
   }[]>`
     select a.id, a.lead_id, a.service, a.address, a.slot_date::text as slot_date, a.slot_window,
            a.exact_window, a.notes, a.tech,
            l.first_name, l.last_name, l.phone,
-           l.address as lead_address, l.service as lead_service, l.call_after
+           l.address as lead_address, l.service as lead_service, l.call_after, l.job_scale
     from fadc.appointments a
     join fadc.leads l on l.id = a.lead_id
     where a.status in ('confirmed', 'pending')
@@ -2708,6 +2814,7 @@ async function runTicketSweep(dryRun: boolean): Promise<Record<string, unknown>>
       phone: r.phone,
       context: null,
       callAfter: r.call_after,
+      scale: r.job_scale,
     });
     if (dryRun) {
       results.push({ lead_id: r.lead_id, name, would_send: ticket });
@@ -2981,7 +3088,7 @@ async function handleCrm(auth: string | null, b: Record<string, any>): Promise<{
 
   if (b.action === "ticket") {
     const [a] = await sql`
-      select a.*, l.first_name, l.last_name, l.phone, l.address as lead_address, l.service as lead_service, l.call_after
+      select a.*, l.first_name, l.last_name, l.phone, l.address as lead_address, l.service as lead_service, l.call_after, l.job_scale
       from fadc.appointments a join fadc.leads l on l.id = a.lead_id where a.id = ${String(b.appointment_id ?? "")}::uuid`;
     if (!a) return { status: 404, body: { error: "no ticket" } };
     setCtxLead(a.lead_id);
@@ -2990,7 +3097,7 @@ async function handleCrm(auth: string | null, b: Record<string, any>): Promise<{
     const ticket = buildTicket({
       name, jobType: null, service: a.service ?? a.lead_service, day: isoToMd(a.slot_date),
       window: a.exact_window ?? a.slot_window, address: a.address ?? a.lead_address, phone: a.phone,
-      context: oldContext, callAfter: null,
+      context: oldContext, callAfter: null, scale: a.job_scale ?? null,
     });
     await sql`update fadc.appointments set notes = ${ticket}, updated_at = now() where id = ${a.id}`;
     const status = String(a.status);
@@ -3610,9 +3717,11 @@ async function handle(req: Request): Promise<Response> {
       try { ticketSweep = await runTicketSweep(body.dry_run === true); } catch (e) { ticketSweep = { error: e instanceof Error ? e.message : String(e) }; }
       let reviewFollowups: Record<string, unknown> = {};
       try { reviewFollowups = await runReviewFollowups(body.dry_run === true); } catch (e) { reviewFollowups = { error: e instanceof Error ? e.message : String(e) }; }
+      let amountChase: Record<string, unknown> = {};
+      try { amountChase = await runAmountChase(body.dry_run === true); } catch (e) { amountChase = { error: e instanceof Error ? e.message : String(e) }; }
       const fu = await runFollowups(body.dry_run === true);
       await heartbeat("fadc_followups", true);
-      return json(200, { ...fu, resume, humanNudge, leaks, ticketSweep, reviewFollowups });
+      return json(200, { ...fu, resume, humanNudge, leaks, ticketSweep, reviewFollowups, amountChase });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       await heartbeat("fadc_followups", false, msg);
