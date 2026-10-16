@@ -2532,6 +2532,7 @@ async function runResume(dryRun: boolean): Promise<Record<string, unknown>> {
       and lm.created_at < now() - interval '10 minutes'
       and lm.created_at > now() - interval '23 hours'
       and exists (select 1 from fadc.messages h where h.lead_id = l.id and h.sent_by = 'human')
+      and not exists (select 1 from fadc.appointments a where a.lead_id = l.id and a.status = 'completed')
     order by lm.created_at asc
     limit 10`;
   const results: Array<Record<string, unknown>> = [];
