@@ -231,8 +231,8 @@ function buildStateNote(lead: Record<string, unknown>): string {
   const fields: Array<[string, string | null, string]> = [
     ["first name", f(lead.first_name), "first_name"],
     ["service", f(lead.service), "service"],
-    ["ZIP / town", f(lead.zip) ?? f(lead.town), "zip"],
     ["phone", f(lead.phone), "phone"],
+    ["ZIP / town", f(lead.zip) ?? f(lead.town), "zip"],
     ["preferred day", f(lead.preferred_day), "preferred_day"],
     ["time window", f(lead.preferred_window), "preferred_window"],
     ["full address", f(lead.address), "address"],
@@ -242,8 +242,12 @@ function buildStateNote(lead: Record<string, unknown>): string {
     else missing.push(label);
   }
 
-  // Ask order: service -> zip -> phone -> day -> window -> name -> address (phone early to capture contact before drop-off)
-  const order = ["service", "ZIP / town", "phone", "preferred day", "time window", "first name", "full address"];
+  // Ask order: service -> phone -> zip -> day -> window -> name -> address.
+  // v85: phone moved ahead of ZIP. The funnel data (13-16 oct) showed 32% of leads give a ZIP
+  // but only 21% ever give a phone — people will state where they live and then go cold before
+  // the next message. Phone is the one field that lets a human close the loop if the chat dies,
+  // so it is asked second, right after service, instead of third.
+  const order = ["service", "phone", "ZIP / town", "preferred day", "time window", "first name", "full address"];
   const nextAsk = order.find((o) => missing.includes(o)) ?? null;
 
   return `(Internal note, NOT from the customer. Do not mention it, do not quote it.
@@ -899,10 +903,11 @@ const OPEN_DAY_RE =
 
 // When we have to stall on a question, we still move the booking forward instead of
 // dead-ending the chat. This picks the next thing we actually still need.
+// v85: phone before zip (see buildStateNote above for why).
 const ASK_LINES: Array<[string, string, string]> = [
   ["service", "what are you looking to get done, air ducts, dryer vent or chimney?", "¿qué quieres que te limpiemos, ductos, secadora o chimenea?"],
-  ["zip", "what's your ZIP code?", "¿cuál es tu código postal?"],
   ["phone", "what's the best phone number for you?", "¿cuál es tu mejor número de teléfono?"],
+  ["zip", "what's your ZIP code?", "¿cuál es tu código postal?"],
   ["preferred_day", "what day works best for you?", "¿qué día te funciona mejor?"], // replaced by the slot offer when one exists
   ["preferred_window", "do mornings or afternoons work better?", "¿te funciona mejor en la mañana o en la tarde?"],
   ["first_name", "what name should I put it under?", "¿a nombre de quién la pongo?"],
@@ -2719,6 +2724,54 @@ async function runLeakAlert(dryRun: boolean): Promise<Record<string, unknown>> {
   return { leaks: results.filter((x) => x.alerted).length, results };
 }
 
+// ── 15-minute unanswered alert ──────────────────────────────────────
+// v85. The leak alert above only fires for a qualified lead (phone + ZIP) after 4 hours cold —
+// that is the right bar for "nobody booked this", but it is much too slow for "the bot never
+// answered at all" (agent_paused while no human replied, needs_human, or a silent error). Any
+// customer message that sits 15+ minutes with no agent reply after it is a dropped conversation
+// regardless of what stage or fields the record has, so this checks every lead, not just
+// qualified ones. Dedup is per MESSAGE, not per lead: a notification counts as covering this
+// message only if it was created after the message's own timestamp, so the same lead can be
+// re-alerted if they write again later and are dropped again.
+async function runUnansweredAlert(dryRun: boolean): Promise<Record<string, unknown>> {
+  const rows = await sql<{
+    id: string; first_name: string | null; phone: string | null; zip: string | null;
+    town: string | null; last_customer: string | null; minutes_cold: number;
+  }[]>`
+    select l.id, l.first_name, l.phone, l.zip, l.town,
+           (select m.text from fadc.messages m where m.lead_id = l.id and m.role = 'customer'
+             order by m.created_at desc limit 1) as last_customer,
+           round(extract(epoch from (now() - l.last_inbound_at)) / 60)::int as minutes_cold
+    from fadc.leads l
+    where l.last_inbound_at is not null
+      and l.last_inbound_at < now() - interval '15 minutes'
+      and l.last_inbound_at > now() - interval '3 hours'
+      and l.stage <> 'closed_lost'
+      and not exists (
+        select 1 from fadc.messages m
+        where m.lead_id = l.id and m.role = 'agent' and m.created_at > l.last_inbound_at)
+      and not exists (
+        select 1 from fadc.notifications n
+        where n.lead_id = l.id and n.kind = 'unanswered15' and n.created_at > l.last_inbound_at)
+    order by l.last_inbound_at
+    limit 10`;
+
+  const results: Array<Record<string, unknown>> = [];
+  for (const r of rows) {
+    const where = [r.town, r.zip].filter(Boolean).join(" ") || "area unknown";
+    const text =
+      `⚠️ NO REPLY IN ${r.minutes_cold} MIN\n` +
+      `${r.first_name ?? "A lead"} wrote and nobody — bot or human — answered.\n` +
+      (r.phone ? `\u{1F4DE} ${r.phone}\n` : "No phone on file — can only be reached in Messenger.\n") +
+      `\u{1F4CD} ${where}\n` +
+      (r.last_customer ? `They wrote: "${r.last_customer.slice(0, 140)}"` : "") ;
+    if (dryRun) { results.push({ id: r.id, would_alert: text }); continue; }
+    await notifyTeamFor(r.id, text, "unanswered15");
+    results.push({ id: r.id, alerted: true, name: r.first_name, minutes_cold: r.minutes_cold });
+  }
+  return { unanswered: results.filter((x) => x.alerted).length, results };
+}
+
 // ── Amount chase ─────────────────────────────────────────────────────
 // v84 — REVENUE THAT IS NEVER RECORDED CANNOT BE MANAGED. The amount prompt went out exactly
 // once, right after the "Done" button was tapped. If nobody replied to it, the job's revenue
@@ -3248,6 +3301,13 @@ async function runCloseout(remind: boolean, dryRun: boolean): Promise<Record<str
   const today = bostonToday().toISOString().slice(0, 10);
   // v80: use <= today so past appointments that were never closed out are also caught.
   // Previously slot_date = today meant citas from Oct 6-8 were silently ignored every day.
+  // v85: that fix still asked a stale appointment only ONCE + reminded ONCE, ever — Ramiro,
+  // Duan, Mike, Oscar, Chris and Digna (all slot_date 6-8 oct) got both messages back on 14-15
+  // oct and then nothing again, because closeout_reminded_at was already set. A past-dated
+  // appointment nobody tapped a button on is not resolved by going quiet about it, so a
+  // PAST-dated one (slot_date < today) that was already reminded 20+ hours ago is asked again
+  // on this sweep, every day, until someone taps an outcome. Today's own appointment still
+  // gets only the one evening reminder.
   const open = remind
     ? await sql`
         select a.*, l.first_name, l.last_name, l.phone, l.address as lead_address, l.service as lead_service
@@ -3256,7 +3316,10 @@ async function runCloseout(remind: boolean, dryRun: boolean): Promise<Record<str
           and a.status in ('pending','confirmed','rescheduled')
           and a.closed_at is null
           and a.closeout_msg_id is not null
-          and a.closeout_reminded_at is null
+          and (
+            a.closeout_reminded_at is null
+            or (a.slot_date < ${today}::date and a.closeout_reminded_at < now() - interval '20 hours')
+          )
         order by a.slot_date, a.slot_window, a.created_at`
     : await sql`
         select a.*, l.first_name, l.last_name, l.phone, l.address as lead_address, l.service as lead_service
@@ -3714,6 +3777,10 @@ async function handle(req: Request): Promise<Response> {
       // a lead that qualified at 8pm should be on someone's phone that night, not at 9am.
       let leaks: Record<string, unknown> = {};
       try { leaks = await runLeakAlert(body.dry_run === true); } catch (e) { leaks = { error: e instanceof Error ? e.message : String(e) }; }
+      // v85: also not gated on business hours — a customer dropped at 9pm needs the same
+      // 15-minute net as one dropped at 9am, independent of stage, phone or ZIP.
+      let unanswered: Record<string, unknown> = {};
+      try { unanswered = await runUnansweredAlert(body.dry_run === true); } catch (e) { unanswered = { error: e instanceof Error ? e.message : String(e) }; }
       let ticketSweep: Record<string, unknown> = {};
       try { ticketSweep = await runTicketSweep(body.dry_run === true); } catch (e) { ticketSweep = { error: e instanceof Error ? e.message : String(e) }; }
       let reviewFollowups: Record<string, unknown> = {};
@@ -3722,7 +3789,7 @@ async function handle(req: Request): Promise<Response> {
       try { amountChase = await runAmountChase(body.dry_run === true); } catch (e) { amountChase = { error: e instanceof Error ? e.message : String(e) }; }
       const fu = await runFollowups(body.dry_run === true);
       await heartbeat("fadc_followups", true);
-      return json(200, { ...fu, resume, humanNudge, leaks, ticketSweep, reviewFollowups, amountChase });
+      return json(200, { ...fu, resume, humanNudge, leaks, unanswered, ticketSweep, reviewFollowups, amountChase });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       await heartbeat("fadc_followups", false, msg);
