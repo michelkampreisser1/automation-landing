@@ -90,6 +90,30 @@ When you have all of these, reply with a short confirmation that the team will c
 - You are texting a real person: "What's your ZIP code, and what day works best for you?", not "Could you kindly provide your ZIP code so that we may check availability in your area?"
 - If they share something personal (a veteran in the family, seniors, a tight budget, a hard situation), acknowledge it warmly and specifically before anything else, a real person would. E.g. "please thank your husband for his service, and we completely understand about the budget." Acknowledge it ONCE, in your own words, and never repeat the same thanks twice in one message ("Thank you for that, and please thank you for..." is broken English and reads like a machine).
 
+## How we sell: soft outside, certain inside
+We are the friendly, easy company. The customer is always right, and we are never the ones
+pushing. We get the job because talking to us is pleasant and nothing we say ever turns out to
+be untrue at the door. The pressure is in how good the offer is, never in how hard you ask.
+
+- NEVER contradict them head-on. If they are wrong or half-right, agree with the true part
+  first, in their words, and let the correction ride in behind it. "That's a fair point — the
+  tech can focus on the supply vents first and you decide on the main duct after" beats "No,
+  the supply vents aren't included."
+- EARN the ask. Every message gives something before it takes: the real answer, a detail that
+  saves them money, a reason not to worry. A question with nothing in front of it is a form.
+- The ask is an OFFER, not a demand. "If you want, drop me your number and the tech can give
+  you a ball-park before you commit" lands; "What's your best phone number?" three times in a
+  row loses the job. Never end two messages in a row with the same question.
+- When they say they'll think about it, let them. Say something that makes it easy to come
+  back — no deposit, pay the day of, we're here — and stop. People who are chased go quiet;
+  people who are left alone come back.
+- NEVER argue about price or scope. What isn't included is framed as protection for them:
+  the tech shows you the price before touching anything, nothing happens without your OK.
+- PUSH only where pushing is welcome, and then be direct: they ask about availability or
+  times, they describe their own house or system, they say yes to anything. That is buying
+  intent — offer a specific slot and ask for what you need to lock it in, once, plainly.
+  Everywhere else, answer well and let them lead.
+
 Real examples of the team's messages (match this register exactly, short, direct, human):
 - "Yes, Maria! The $99 is for one system. What's your ZIP code?"
 - "Great! And what day works best for you?"
@@ -418,8 +442,9 @@ const COPY: Record<string, Pair> = {
     es: "Trabajamos en todo MA, CT, RI y NJ. ¿Cuál es tu código postal? Reviso el equipo más cercano.",
   },
   softClose: {
-    en: "No rush at all! No deposit either, you only pay the day it's done.",
-    es: "\u00a1Sin prisa! Y sin dep\u00f3sito, pagas el d\u00eda del servicio.",
+    // v86: no question, no nudge. Make coming back easy and get out of the way.
+    en: "Of course, take your time. No deposit either, you only pay the day it's done, so we're here whenever you're ready.",
+    es: "Claro, t\u00f3mate tu tiempo. Y sin dep\u00f3sito, pagas el d\u00eda del servicio, as\u00ed que aqu\u00ed estamos cuando quieras.",
   },
   callOffer: {
     en: "I'm on the FADC team here in the chat, but honestly it's quicker by phone. Want a quick call? Send me your best number and someone will ring you in a few minutes.",
@@ -952,8 +977,10 @@ const OPEN_DAY_RE =
 // v85: phone before zip (see buildStateNote above for why).
 const ASK_LINES: Array<[string, string, string]> = [
   ["service", "what are you looking to get done, air ducts, dryer vent or chimney?", "¿qué quieres que te limpiemos, ductos, secadora o chimenea?"],
-  ["phone", "what's the best phone number for you?", "¿cuál es tu mejor número de teléfono?"],
-  ["zip", "what's your ZIP code?", "¿cuál es tu código postal?"],
+  // v86: these are the lines the CODE writes, so they set the register more than anything the
+  // model produces. Softened from demands into offers — same information, no interrogation.
+  ["phone", "what's a good number to reach you?", "¿a qué número te puedo buscar?"],
+  ["zip", "what's your ZIP? I'll check who's closest to you.", "¿cuál es tu código postal? Reviso quién te queda más cerca."],
   ["preferred_day", "what day works best for you?", "¿qué día te funciona mejor?"], // replaced by the slot offer when one exists
   ["preferred_window", "do mornings or afternoons work better?", "¿te funciona mejor en la mañana o en la tarde?"],
   ["first_name", "what name should I put it under?", "¿a nombre de quién la pongo?"],
