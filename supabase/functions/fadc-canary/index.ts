@@ -32,6 +32,17 @@ const REALERT_MINUTES = 60;
 // with no bot reply, alert even if all cron jobs are healthy (catches bot downtime silently).
 const UNANSWERED_LEAD_MINUTES = 30;
 
+// v5 — DEAD ENGINE. On 17 Oct the Anthropic API ran out of credit at 09:00. Every cron kept
+// firing and writing a healthy heartbeat (they ran fine — the model call inside them failed),
+// and the unanswered-lead check never tripped because it only looks at brand-new leads that
+// never got ANY agent message: the 91 failures were follow-ups to leads that already had
+// replies, and the one new lead was answered by hand within four minutes. So the system was
+// dead for three hours and reported itself perfectly healthy. The direct signal is the one
+// nobody was reading: fadc.agent_runs rows with a non-null error. If that many of the most
+// recent runs in the window all failed, the engine is down regardless of what else looks fine.
+const ENGINE_WINDOW_MINUTES = 30;
+const ENGINE_FAIL_STREAK = 3;
+
 async function sendTelegram(text: string): Promise<boolean> {
   if (!TG_TOKEN || !TG_CHAT) return false;
   try {
@@ -125,6 +136,24 @@ Deno.serve(async (req: Request) => {
       having extract(epoch from (now() - min(m.created_at))) / 60 > ${UNANSWERED_LEAD_MINUTES}
     `;
 
+    // ── Dead-engine check ─────────────────────────────────────────────────────
+    // Look at the most recent agent_runs inside the window. If there are at least
+    // ENGINE_FAIL_STREAK of them and every single one carries an error, the model call
+    // is failing for everybody — out of credit, bad key, provider outage. The error text
+    // goes straight into the alert so the cause is readable without opening the database.
+    type EngineRow = { total: number; failed: number; last_error: string | null; oldest_min: number };
+    const [engine] = await sql<EngineRow[]>`
+      select
+        count(*)::int as total,
+        count(*) filter (where error is not null)::int as failed,
+        (array_agg(error order by created_at desc) filter (where error is not null))[1] as last_error,
+        coalesce(round(extract(epoch from (now() - min(created_at))) / 60), 0)::int as oldest_min
+      from fadc.agent_runs
+      where created_at > now() - make_interval(mins => ${ENGINE_WINDOW_MINUTES})
+    `;
+    const engineDown =
+      !!engine && engine.total >= ENGINE_FAIL_STREAK && engine.failed === engine.total;
+
     // State machine: ok ↔ alerting, same as v1
     const [stateRow] = await sql`select value from fadc.settings where key = 'canary_state'`;
     let state: { status: "ok" | "alerting"; last_alert_at: string | null } = stateRow?.value
@@ -135,7 +164,7 @@ Deno.serve(async (req: Request) => {
     let action = "none";
     let telegramSent = false;
 
-    if (stale.length > 0 || unanswered.length > 0) {
+    if (stale.length > 0 || unanswered.length > 0 || engineDown) {
       const shouldAlert =
         state.status === "ok" ||
         !state.last_alert_at ||
@@ -143,6 +172,18 @@ Deno.serve(async (req: Request) => {
 
       if (shouldAlert) {
         const parts: string[] = [];
+        if (engineDown) {
+          // Trim the provider's JSON down to the human sentence when there is one.
+          const raw = engine.last_error ?? "sin detalle";
+          const msg = raw.match(/"message"\s*:\s*"([^"]+)"/)?.[1] ?? raw.slice(0, 200);
+          parts.push(
+            `🚨 EL BOT NO ESTÁ CONTESTANDO A NADIE\n` +
+            `Los últimos ${engine.total} intentos fallaron, todos. Lleva ~${engine.oldest_min} min así.\n\n` +
+            `Error: ${msg}\n\n` +
+            `Si dice que no hay crédito, recarga en console.anthropic.com → Plans & Billing. ` +
+            `El bot revive solo, no hay que desplegar nada.`
+          );
+        }
         if (stale.length > 0) {
           const jobLabels: Record<string, string> = {
             fadc_followups:        "Follow-ups a leads",
