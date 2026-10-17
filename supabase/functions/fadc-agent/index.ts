@@ -223,7 +223,40 @@ function json(status: number, body: unknown) {
 // Build an explicit state note so the model can never re-ask for something we already have.
 // This is the structural fix for the #1 observed failure: re-asking ZIP / day / phone that
 // the customer already gave. Prompt text alone was not reliable enough.
-function buildStateNote(lead: Record<string, unknown>): string {
+// v86 — THE NAG. Jeanmarie Martin asked four real questions in a row ("what is the main duct
+// system?", "I want the supply vents cleaned", "ball park quote?", "I'll get back to you") and
+// every single reply ended with "What's your best phone number?". Four times. She never gave it
+// and signed off. Step 3 below says "ask for the first item still missing", and after v85 put
+// phone first in the order, a lead who won't hand over a number gets the same question forever.
+// Answering well and then asking the same thing again reads as a form, not a person.
+// So: a field asked in either of the last two agent messages is OFF the table for this one.
+// The reply still answers them — it just stops ending every message with the same demand.
+const FIELD_ASK_RE: Record<string, RegExp> = {
+  "phone": /(phone number|best number|number (for|to reach) you|number i can|n[úu]mero de tel[ée]fono|tu mejor n[úu]mero|a qu[ée] n[úu]mero)/i,
+  "ZIP / town": /(zip code|your zip|what town|c[óo]digo postal|qu[ée] ciudad|en qu[ée] pueblo)/i,
+  "preferred day": /(what day works|which day works|qu[ée] d[íi]a te (funciona|queda|viene))/i,
+  "time window": /(mornings or afternoons|morning or afternoon|ma[ñn]ana o (en la )?tarde)/i,
+  "first name": /(what name should|name should i put|a nombre de qui[ée]n)/i,
+  "full address": /(street address|full address|direcci[óo]n completa)/i,
+  "service": /(air ducts, dryer vent or chimney|ductos, secadora o chimenea)/i,
+};
+
+// Fields the agent already asked for in its last `turns` messages and did not get.
+function recentlyAskedFields(
+  history: { role: string; text: string }[],
+  turns = 2,
+): Set<string> {
+  const recentAgent = history.filter((m) => m.role === "agent").slice(-turns);
+  const asked = new Set<string>();
+  for (const m of recentAgent) {
+    for (const [field, re] of Object.entries(FIELD_ASK_RE)) {
+      if (re.test(m.text ?? "")) asked.add(field);
+    }
+  }
+  return asked;
+}
+
+function buildStateNote(lead: Record<string, unknown>, justAsked?: Set<string>): string {
   const f = (v: unknown) => (v === null || v === undefined || v === "" ? null : String(v));
   const known: string[] = [];
   const missing: string[] = [];
@@ -248,7 +281,11 @@ function buildStateNote(lead: Record<string, unknown>): string {
   // the next message. Phone is the one field that lets a human close the loop if the chat dies,
   // so it is asked second, right after service, instead of third.
   const order = ["service", "phone", "ZIP / town", "preferred day", "time window", "first name", "full address"];
-  const nextAsk = order.find((o) => missing.includes(o)) ?? null;
+  const blocked = justAsked ?? new Set<string>();
+  // The next ask skips anything already asked in the last two messages, so the conversation
+  // moves on instead of repeating. If everything still missing is blocked, we ask for nothing.
+  const nextAsk = order.find((o) => missing.includes(o) && !blocked.has(o)) ?? null;
+  const nagging = [...blocked].filter((b) => missing.includes(b));
 
   return `(Internal note, NOT from the customer. Do not mention it, do not quote it.
 
@@ -256,12 +293,21 @@ ALREADY COLLECTED as of before their latest message. NEVER ask for any of these 
 ${known.length ? known.join("\n") : "- (nothing yet)"}
 
 STILL MISSING: ${missing.length ? missing.join(", ") : "nothing, you have everything"}
-
+${nagging.length ? `
+ALREADY ASKED, DO NOT ASK AGAIN IN THIS MESSAGE: ${nagging.join(", ")}.
+You asked for this in your last message(s) and they did not give it. Asking a third time reads
+as pushy and loses the customer. Answer what they actually asked, give them one genuinely useful
+detail, and let them lead. They will give it when they are ready, or a teammate will call them.
+` : ""}
 STEP 1: Read their latest message and pull out anything new (a ZIP, a day, a phone, an address, how many systems). Treat anything they just gave as COLLECTED too, never ask for it back.
-STEP 2: Answer whatever they actually asked, in ONE short sentence.
-STEP 3: Ask for exactly ONE thing: the first item still missing after step 1${nextAsk ? ` (right now that looks like: ${nextAsk})` : ""}. If nothing is missing, go straight to the handoff message and set stage to ready_to_confirm.
+STEP 2: Answer whatever they actually asked, properly. If they asked something real, this is the whole job of the message.
+STEP 3: ${nextAsk
+  ? `Then ask for exactly ONE thing: ${nextAsk}.`
+  : missing.length
+    ? `Ask for NOTHING this time. End on the answer, or on something helpful about the job. No question at the end.`
+    : `Nothing is missing: go straight to the handoff message and set stage to ready_to_confirm.`}
 
-Do NOT recap or summarize back what they told you. Do NOT list what the package includes unless they just asked. Do NOT ask two things in one message.)`;
+Do NOT recap or summarize back what they told you. Do NOT list what the package includes unless they just asked. Do NOT ask two things in one message. NEVER end two messages in a row with the same question.)`;
 }
 
 // --- Special-pricing safety net -------------------------------------------
@@ -914,11 +960,26 @@ const ASK_LINES: Array<[string, string, string]> = [
   ["address", "what's the full street address?", "¿cuál es la dirección completa?"],
 ];
 
+// v86: `justAsked` carries the buildStateNote field labels already asked in the last two agent
+// messages. The code-written lines go through here too — the soft close after "I'll get back to
+// you" re-asked Jeanmarie for her phone a fourth time — so they skip the same fields the model
+// does. Returning null is fine: callers fall back to a line that does not demand anything.
+const ASK_KEY_TO_LABEL: Record<string, string> = {
+  service: "service",
+  phone: "phone",
+  zip: "ZIP / town",
+  preferred_day: "preferred day",
+  preferred_window: "time window",
+  first_name: "first name",
+  address: "full address",
+};
+
 function nextAskLine(
   lead: Record<string, unknown>,
   L: Record<string, string | null> | undefined,
   es: boolean,
   slot?: string | null,
+  justAsked?: Set<string>,
 ): string | null {
   const have = (k: string) => {
     const a = L ? L[k] : null;
@@ -928,6 +989,7 @@ function nextAskLine(
   for (const [k, qEn, qEs] of ASK_LINES) {
     const got = k === "zip" ? (have("zip") || have("town")) : have(k);
     if (got) continue;
+    if (justAsked?.has(ASK_KEY_TO_LABEL[k] ?? k)) continue;
     // The day is the one field we never ask for in the open. Offer a slot instead; the
     // window comes with it, so there is nothing left to ask separately.
     if (k === "preferred_day" && slot) return holdLine(slot, es);
@@ -1762,9 +1824,10 @@ async function processInbound(input: {
     history.reverse();
 
     // 5. Claude — with an explicit note of what we already know, so it can't re-ask
+    const justAsked = recentlyAskedFields(history as { role: string; text: string }[]);
     const out = await callClaude(
       history as { role: string; text: string }[],
-      buildStateNote(lead as unknown as Record<string, unknown>) + (attachNote ? "\n\n" + attachNote : ""),
+      buildStateNote(lead as unknown as Record<string, unknown>, justAsked) + (attachNote ? "\n\n" + attachNote : ""),
     );
     // Only code decides when the agent stops talking. The model asking for a person is a
     // request to TELL someone, never a licence to ignore the customer. Michel's rule: the
@@ -1845,7 +1908,7 @@ async function processInbound(input: {
     if (special.hit && !isEmergency) {
       const big = quotedBigTotal(out.reply) ?? quotedBigTotal(text);
       if (big) {
-        const ask = nextAskLine(lead as unknown as Record<string, unknown>, out.lead, es, slot);
+        const ask = nextAskLine(lead as unknown as Record<string, unknown>, out.lead, es, slot, justAsked);
         out.reply = say(COPY.bigTotal) + (ask ? `${es ? ". Mientras, " : ". In the meantime, "}${ask}` : ".");
         out.needs_human = true;
         await notifyTeam(`\u{1F6AB} Blocked a raw $${big} total before it reached the customer (${special.why}).`, "guard");
@@ -1929,7 +1992,7 @@ async function processInbound(input: {
     if (thinkingHit) holdHours = (hitLongWait(text) ? 24 * 6 : 44);
 
     if (thinkingHit && lead.soft_close_used !== true) {
-      const ask = nextAskLine(lead as unknown as Record<string, unknown>, out.lead, es, slot);
+      const ask = nextAskLine(lead as unknown as Record<string, unknown>, out.lead, es, slot, justAsked);
       // Keep whatever actually answered their question, cut the sign-off AND any slot offer
       // the model already wrote (v79: the model doesn't know the customer just said "not yet",
       // so it often tacks on "I have Tuesday open, want me to hold it?" — which is exactly
@@ -1940,10 +2003,13 @@ async function processInbound(input: {
       answered = answered.split(/(?<=[.!?])\s+/)
         .filter((s: string) => !OFFER_Q_RE.test(s))
         .join(" ").trim();
+      // v86: when `ask` comes back null the field was already asked in the last two messages.
+      // "I'll get back to you" plus a question we just asked is the nag that lost Jeanmarie.
+      // Let the soft close stand on its own \u2014 no question at all. They know how to reach us.
       out.reply = [
         answered,
         say(COPY.softClose),
-        ask ? cap(ask) : (es ? "\u00bfTe aparto un horario esta semana?" : "Want me to hold a slot for you this week?"),
+        ask ? cap(ask) : "",
       ].filter(Boolean).join(" ");
       out.lead = out.lead ?? {};
       out.lead.stage = "qualifying"; // never close a lead who only said "let me think"
@@ -1989,7 +2055,7 @@ async function processInbound(input: {
     if ((areaQ || areaLeak) && !isEmergency && !escalateHit && !misclickHit) {
       const zipKnown = !!(out.lead.zip || lead.zip || out.lead.town || lead.town);
       const next = zipKnown
-        ? nextAskLine(lead as unknown as Record<string, unknown>, out.lead, es, slot)
+        ? nextAskLine(lead as unknown as Record<string, unknown>, out.lead, es, slot, justAsked)
         : null;
       const place = (out.lead.town || (lead.town as string | null) || out.lead.zip || (lead.zip as string | null) || "").toString().trim();
       const zipNow = (out.lead.zip || (lead.zip as string | null) || "").toString();
@@ -2077,7 +2143,7 @@ async function processInbound(input: {
       // A handoff reply usually ends with no question ("someone will call you"), which leaves
       // the customer nothing to answer. Never dead-end a lead that is still qualifying.
       if (!/[?\u00bf]/.test(out.reply)) {
-        const nextQ = nextAskLine(lead as unknown as Record<string, unknown>, out.lead, es, slot);
+        const nextQ = nextAskLine(lead as unknown as Record<string, unknown>, out.lead, es, slot, justAsked);
         if (nextQ) out.reply = `${out.reply} ${cap(nextQ)}`.trim();
       }
     }
