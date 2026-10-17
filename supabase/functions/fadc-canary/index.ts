@@ -21,8 +21,12 @@ const TG_CHAT = Deno.env.get("TELEGRAM_CHAT_ID") ?? "";
 const JOBS: Record<string, number> = {
   fadc_followups:        25,   // runs every 10 min (was 30) → stale after 25, generous padding over schedule
   fadc_ad_spend:        300,   // runs every 4 h   → stale after 5 h
-  fadc_closeout_ask:    180,   // runs at 21:00 & 22:00 → stale after 3 h (checked relative to last run)
-  fadc_closeout_remind: 180,   // runs at 00:00 & 01:00 → stale after 3 h
+  // v5: these two run ONCE A DAY, so a 3 h threshold marked them stale for ~20 h out of every
+  // 24 and the canary sat in "alerting" permanently, re-firing every REALERT_MINUTES. Michel
+  // was getting roughly seventeen false alarms a day, which is exactly how a real alert gets
+  // ignored. A daily job is only late once it has missed its whole next window: 25 h.
+  fadc_closeout_ask:   1500,   // runs daily at 21:00 & 22:00 → stale after 25 h
+  fadc_closeout_remind: 1500,  // runs daily at 00:00 & 01:00 → stale after 25 h
   fadc_weekly_summary: 10200,  // runs Wed 12:00     → stale after 7 d + 2 h (10200 min)
 };
 
@@ -128,12 +132,18 @@ Deno.serve(async (req: Request) => {
       from fadc.leads l
       join fadc.messages m on m.lead_id = l.id and m.role = 'customer'
       where l.created_at > now() - interval '24 hours'
+        -- v5: a lead the bot deliberately did not answer is not a failure. Every one of the
+        -- three "unanswered leads" this check reported on 17 Oct was noise: an obscene troll
+        -- (already closed_lost) and two people saying goodbye. Alerting on those teaches
+        -- everyone to ignore the channel.
+        and l.stage <> 'closed_lost'
         and not exists (
           select 1 from fadc.messages m2
           where m2.lead_id = l.id and m2.role = 'agent'
         )
       group by l.id
       having extract(epoch from (now() - min(m.created_at))) / 60 > ${UNANSWERED_LEAD_MINUTES}
+         and min(m.text) !~* '(unsubscribe|stop messaging|no need|not interested|no thanks|thanks anyway|wrong number|^\\s*bye)'
     `;
 
     // ── Dead-engine check ─────────────────────────────────────────────────────
