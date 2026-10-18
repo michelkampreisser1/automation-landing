@@ -1820,37 +1820,17 @@ async function processInbound(input: {
       return { reply: "", stage: lead.stage, needs_human: false, paused: true };
     }
 
-    // 3b. REVIEW REPLY — the customer answered our "how did it go?" post-job message.
-    // Their reply resets Meta's 24h window so we can now send the review request with $20
-    // discount. This intercepts BEFORE the Claude call: no need to run the full agent for
-    // a fixed-copy thank-you + review link.
-    if (lead.review_followup_at && !lead.review_requested) {
-      const REVIEWS_LINK = "http://facebook.com/profile.php?id=61593572532326&sk=reviews";
-      const custTexts = (await sql`select text from fadc.messages where lead_id = ${leadId} and role = 'customer' order by created_at`).map((r: any) => r.text);
-      const reviewEs = isSpanish(custTexts.join("\n"));
-      // Check for negative sentiment — don't send a review request to someone who had a bad time
-      const NEG_RE = /\b(terrible|horrible|awful|bad|worst|disgusting|rip.?off|scam|complain|refund|disappointed|angry|furious|never again|no good|do not recommend|don.?t recommend|malo|p[eé]simo|horrible|asco|estafa|queja|reembolso|decepcionado|enojado|nunca m[aá]s)\b/i;
-      if (NEG_RE.test(text)) {
-        // Negative reply to "how did it go?" — escalate, don't ask for a review
-        await notifyTeam(
-          `⚠️ ${lead.first_name ?? "A customer"} had a BAD experience after their job.\nThey wrote: "${text.slice(0, 200)}"\n→ Reach out and fix this before it becomes a bad review.`,
-          "review_negative",
-        );
-        await sql`update fadc.leads set review_requested = true where id = ${leadId}`;
-        return { reply: "", stage: lead.stage, needs_human: true };
-      }
-      // Positive or neutral — send review request with $20 discount
-      const reviewReply = reviewEs
-        ? `¡Qué bueno saberlo! Si tienes un minuto, nos ayudaría mucho una reseña, así otras familias nos pueden encontrar. Como agradecimiento, te damos $20 de descuento en tu próximo servicio.\n\n${REVIEWS_LINK}`
-        : `So glad to hear that! If you have a minute, a quick review would mean a lot to us, it helps other families find us. And as a thank you, you'll get $20 off your next service!\n\n${REVIEWS_LINK}`;
-      await sql`insert into fadc.messages (lead_id, role, text, sent_by) values (${leadId}, 'agent', ${reviewReply}, 'review_request')`;
-      await sendMessengerReply(messengerId, reviewReply);
-      await sql`update fadc.leads set review_requested = true where id = ${leadId}`;
+    // 3b. POST-JOB REPLY — the review ask already carried the link, so there is nothing
+    // left to send. We still read their reply for one reason: catching a bad job before it
+    // becomes a public review. Anything else falls through to the agent, which can thank
+    // them properly or take a second booking — both better than a canned line.
+    if (lead.review_followup_at && BAD_EXPERIENCE_RE.test(text)) {
       await notifyTeam(
-        `⭐ Review request sent to ${lead.first_name ?? "a customer"} ($20 discount). They said: "${text.slice(0, 120)}"`,
-        "review_sent",
+        `⚠️ ${lead.first_name ?? "A customer"} had a BAD experience after their job.\nThey wrote: "${text.slice(0, 200)}"\n→ Call them today. We already sent them the review link.`,
+        "review_negative",
       );
-      return { reply: reviewReply, stage: lead.stage, needs_human: false };
+      await sql`update fadc.leads set agent_paused = true where id = ${leadId}`;
+      return { reply: "", stage: lead.stage, needs_human: true, paused: true };
     }
 
     // 4. History + typing indicator in parallel (speed: customer sees "typing..." immediately)
@@ -2993,6 +2973,11 @@ async function runTicketSweep(dryRun: boolean): Promise<Record<string, unknown>>
   return { ok: true, sent: results.filter((x: any) => x.sent).length, results };
 }
 
+const REVIEWS_LINK = "https://www.facebook.com/profile.php?id=61593572532326&sk=reviews";
+// Someone who had a bad time gets a person, never a review link.
+const BAD_EXPERIENCE_RE =
+  /\b(terrible|horrible|awful|bad|worst|disgusting|rip.?off|scam|complain|refund|disappointed|angry|furious|never again|no good|do not recommend|don.?t recommend|malo|p[eé]simo|asco|estafa|queja|reembolso|decepcionado|enojado|nunca m[aá]s)\b/i;
+
 // ── Review follow-ups ───────────────────────────────────────────────
 // Sends "How did everything go?" to customers whose appointment was
 // marked done 2-24h ago AND whose Meta 24h messaging window is still
@@ -3017,9 +3002,14 @@ async function runReviewFollowups(dryRun: boolean): Promise<Record<string, unkno
     // Detect language from customer's message history
     const msgs = (await sql`select text from fadc.messages where lead_id = ${r.lead_id} and role = 'customer' order by created_at`).map((m: any) => m.text);
     const es = isSpanish(msgs.join("\n"));
+    // One message, not two. The old flow asked "how did it go?" and only sent the link if
+    // they replied — of the one lead that ever got here, nobody replied, so the link never
+    // went out. The link ships with the ask now, so a reply is a bonus, not a requirement.
+    // The "if something was off, tell me here" line is deliberate: it routes a bad job to
+    // us instead of to the public page.
     const msg = es
-      ? `¡Hola${r.first_name ? ` ${r.first_name}` : ""}! ¿Cómo te fue con el servicio? Nos encantaría saber tu opinión 😊`
-      : `Hi${r.first_name ? ` ${r.first_name}` : ""}! How did everything go with the service? We'd love to hear your feedback 😊`;
+      ? `¡Hola${r.first_name ? ` ${r.first_name}` : ""}! ¿Cómo te fue con el servicio? Si el equipo te atendió bien, una reseña nos ayudaría mucho — así otras familias nos encuentran. Y te damos $20 de descuento en tu próximo servicio.\n\n${REVIEWS_LINK}\n\nY si algo no salió bien, dímelo por aquí y lo resuelvo.`
+      : `Hi${r.first_name ? ` ${r.first_name}` : ""}! How did everything go with the service? If the team took good care of you, a quick review would help us a lot — it's how other families find us. And it gets you $20 off your next service.\n\n${REVIEWS_LINK}\n\nAnd if anything wasn't right, just tell me here and I'll make it right.`;
 
     if (dryRun) {
       results.push({ lead_id: r.lead_id, name: r.first_name, would_send: msg });
@@ -3027,7 +3017,7 @@ async function runReviewFollowups(dryRun: boolean): Promise<Record<string, unkno
     }
     await sql`insert into fadc.messages (lead_id, role, text, sent_by) values (${r.lead_id}, 'agent', ${msg}, 'review_followup')`;
     await sendMessengerReply(r.messenger_id, msg);
-    await sql`update fadc.leads set review_followup_at = now() where id = ${r.lead_id}`;
+    await sql`update fadc.leads set review_followup_at = now(), review_requested = true where id = ${r.lead_id}`;
     results.push({ lead_id: r.lead_id, name: r.first_name, sent: true });
   }
   return { ok: true, sent: results.filter((x: any) => x.sent).length, results };
