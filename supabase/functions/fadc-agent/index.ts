@@ -288,8 +288,8 @@ function buildStateNote(lead: Record<string, unknown>, justAsked?: Set<string>):
   const fields: Array<[string, string | null, string]> = [
     ["first name", f(lead.first_name), "first_name"],
     ["service", f(lead.service), "service"],
-    ["phone", f(lead.phone), "phone"],
     ["ZIP / town", f(lead.zip) ?? f(lead.town), "zip"],
+    ["phone", f(lead.phone), "phone"],
     ["preferred day", f(lead.preferred_day), "preferred_day"],
     ["time window", f(lead.preferred_window), "preferred_window"],
     ["full address", f(lead.address), "address"],
@@ -299,12 +299,22 @@ function buildStateNote(lead: Record<string, unknown>, justAsked?: Set<string>):
     else missing.push(label);
   }
 
-  // Ask order: service -> phone -> zip -> day -> window -> name -> address.
-  // v85: phone moved ahead of ZIP. The funnel data (13-16 oct) showed 32% of leads give a ZIP
-  // but only 21% ever give a phone — people will state where they live and then go cold before
-  // the next message. Phone is the one field that lets a human close the loop if the chat dies,
-  // so it is asked second, right after service, instead of third.
-  const order = ["service", "phone", "ZIP / town", "preferred day", "time window", "first name", "full address"];
+  // Ask order: service -> zip -> phone -> day -> window -> name -> address.
+  //
+  // v85 moved phone ahead of ZIP on the theory that phone is the field that rescues a dead
+  // chat. v87 moves it back, because the 30-day numbers say the theory was wrong:
+  //
+  //   phone AND zip   16 leads → 13 appointments (81%)
+  //   zip only        26 leads →  0
+  //   phone only       1 lead  →  0
+  //   neither         47 leads →  0
+  //
+  // What converts is the PAIR, not the phone: nobody with just one of them ever booked. And a
+  // ZIP is given 2.5x more often than a phone (42 leads vs 17). Leading with the question
+  // people refuse does not make them answer it — it loses them before they reach the easy one.
+  // Operationally it is also the wrong order: service + ZIP is enough to qualify the job and
+  // find a crew, while a phone number with no area attached cannot be dispatched at all.
+  const order = ["service", "ZIP / town", "phone", "preferred day", "time window", "first name", "full address"];
   const blocked = justAsked ?? new Set<string>();
   // The next ask skips anything already asked in the last two messages, so the conversation
   // moves on instead of repeating. If everything still missing is blocked, we ask for nothing.
@@ -979,8 +989,9 @@ const ASK_LINES: Array<[string, string, string]> = [
   ["service", "what are you looking to get done, air ducts, dryer vent or chimney?", "¿qué quieres que te limpiemos, ductos, secadora o chimenea?"],
   // v86: these are the lines the CODE writes, so they set the register more than anything the
   // model produces. Softened from demands into offers — same information, no interrogation.
-  ["phone", "what's a good number to reach you?", "¿a qué número te puedo buscar?"],
+  // v87: zip back ahead of phone (see buildStateNote for the numbers).
   ["zip", "what's your ZIP? I'll check who's closest to you.", "¿cuál es tu código postal? Reviso quién te queda más cerca."],
+  ["phone", "what's a good number to reach you?", "¿a qué número te puedo buscar?"],
   ["preferred_day", "what day works best for you?", "¿qué día te funciona mejor?"], // replaced by the slot offer when one exists
   ["preferred_window", "do mornings or afternoons work better?", "¿te funciona mejor en la mañana o en la tarde?"],
   ["first_name", "what name should I put it under?", "¿a nombre de quién la pongo?"],
