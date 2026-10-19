@@ -1377,11 +1377,14 @@ const COMMENT_NO_AUTO_RE =
 const COMMENT_NO_AUTO_ES_RE =
   /(estafa|fraude|ladr[óo]n|no llegaron|no se present|reembolso|demanda|abogado|p[ée]simo|horrible|grosero|me rompieron|me robaron|mentir)/i;
 
-async function sendPrivateReplyToComment(commentId: string, text: string): Promise<void> {
-  if (!META_PAGE_TOKEN || !text) return;
+async function sendPrivateReplyToComment(
+  commentId: string,
+  text: string,
+): Promise<{ psid: string | null }> {
+  if (!META_PAGE_TOKEN || !text) return { psid: null };
   if (!BOT_LIVE_MODE) {
     await notifyTeam(`\u{1F9EA} [TEST MODE, not sent] Would privately reply to comment ${commentId}:\n"${text}"`, "test_mode");
-    return;
+    return { psid: null };
   }
   // recipient.comment_id is what opens the 7-day thread. It is a different recipient shape
   // from recipient.id, which is why this does not go through sendMessengerReply.
@@ -1390,7 +1393,18 @@ async function sendPrivateReplyToComment(commentId: string, text: string): Promi
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ recipient: { comment_id: commentId }, message: { text } }),
   });
-  if (!res.ok) throw new Error(`private reply ${res.status}: ${await res.text()}`);
+  const body = await res.text();
+  if (!res.ok) throw new Error(`private reply ${res.status}: ${body}`);
+  // Meta answers with {"recipient_id": "<PSID>", "message_id": "..."}. That PSID is the only
+  // way to tie this outbound message to a lead row: at comment time the thread does not exist
+  // yet, so there is no PSID to address and nothing to log against. We used to drop this
+  // response, and the cost is in the comment below on handleComment.
+  try {
+    const psid = String(JSON.parse(body)?.recipient_id ?? "").trim();
+    return { psid: psid || null };
+  } catch {
+    return { psid: null };
+  }
 }
 
 async function handleComment(value: Record<string, any>): Promise<void> {
@@ -1434,8 +1448,32 @@ async function handleComment(value: Record<string, any>): Promise<void> {
   }
 
   try {
-    await sendPrivateReplyToComment(commentId, COMMENT_OPENER(firstName));
-    await sql`update fadc.comment_replies set replied = true where comment_id = ${commentId}`;
+    // JENNIFER JUDGE (found 19 oct). The opener went out and was never written to
+    // fadc.messages, because a comment has no PSID to hang a lead off. She answered "02641"
+    // and the model built its reply from a history of exactly one line, hers. To the model
+    // that was the first message of a brand new conversation, so it greeted her a second
+    // time: "Hi Jennifer! ..." and then "Hey! What service are you looking for...".
+    // The PSID in the send response fixes the ordering: lead first, then the opener on it.
+    const opener = COMMENT_OPENER(firstName);
+    const { psid } = await sendPrivateReplyToComment(commentId, opener);
+    let leadId: string | null = null;
+    if (psid) {
+      const lastName = fromName ? (fromName.split(/\s+/).slice(1).join(" ") || null) : null;
+      const [lead] = await sql<{ id: string }[]>`
+        insert into fadc.leads (messenger_id, manychat_id, first_name, last_name, last_outbound_at)
+        values (${psid}, ${psid}, ${firstName}, ${lastName}, now())
+        on conflict (messenger_id) do update
+          set first_name = coalesce(fadc.leads.first_name, excluded.first_name),
+              last_name  = coalesce(fadc.leads.last_name,  excluded.last_name),
+              last_outbound_at = now()
+        returning id`;
+      leadId = lead?.id ?? null;
+      if (leadId) {
+        await sql`insert into fadc.messages (lead_id, role, text, sent_by)
+                  values (${leadId}, 'agent', ${opener}, 'comment_opener')`;
+      }
+    }
+    await sql`update fadc.comment_replies set replied = true, lead_id = ${leadId} where comment_id = ${commentId}`;
     await notifyTeam(
       `\u{1F4AC} New comment on the ad, the bot sent a private message and the 7-day window is open.\n` +
       `${fromName ?? "Someone"} commented: "${text.slice(0, 200)}"\n` +
