@@ -3199,13 +3199,16 @@ async function runFollowups(dryRun: boolean): Promise<Record<string, unknown>> {
         await sql`insert into fadc.agent_runs (lead_id, inbound_text, model, error, latency_ms)
           values (${r.id}, '[followup]', ${MODEL}, ${msg}, ${Date.now() - t0})`;
       } catch (_) { /* ignore */ }
-      // Meta permanently refuses some recipient IDs ("(#100) cannot send messages to this id") —
-      // blocked/unsubscribed/stale conversation. That message row inserted above never actually
-      // went out, so mark it failed rather than leaving a ghost "sent" record. And without this,
-      // the lead matches the same followup query again next run forever (followup_count never
-      // advances past the throw) — Maryjane Docchio hit this 22 times in a row with nobody told.
-      // Stop retrying and hand it to a person once, instead of silently forever.
-      if (/cannot send messages to this id/i.test(msg)) {
+      // Meta refuses some recipients permanently. It says so in two different ways and we have
+      // now been bitten by both: "(#100) cannot send messages to this id", and "(#551) This
+      // person isn't available right now" — the one a blocked or restricted Page gets. Only the
+      // first was matched here, so a 551 lead matched the followup query again every run
+      // forever: one unnamed lead burned 21 retries in 24 hours on 19 oct, and those errors
+      // drowned the real ones in the error rate. The message row inserted above never went out,
+      // so mark it failed rather than leaving a ghost "sent" record, then stop and hand it to a
+      // person once. (Jennifer Judge gave 551 with a different subcode the same day — the
+      // subcodes vary, the 551 does not, so match on the code and the sentence, not the subcode.)
+      if (/cannot send messages to this id|isn.?t available right now|\(#551\)/i.test(msg)) {
         try {
           await sql`update fadc.messages set sent_by = 'followup_failed', text = '[NOT SENT] ' || text where id = ${fuMsgRow?.id ?? null}`;
         } catch (_) { /* ignore */ }
