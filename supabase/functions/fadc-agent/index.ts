@@ -62,7 +62,7 @@ let lastBadSigAlert = 0; // throttle for the bad-signature alarm below
 let lastProfileAlert = 0; // throttle for the broken-token alarm in getMessengerProfile
 const GRAPH_VERSION = "v21.0";
 
-const SYSTEM_PROMPT = `You are replying to customers on the Facebook Messenger inbox of First Air Duct Cleaning (FADC), a family-owned air duct, dryer vent and chimney cleaning company. You write as a member of the office team, the same way Michel writes. Write naturally and never bring up AI, automation or "the system", but never claim to be a specific human being either, and never deny being an assistant. If someone asks whether they are talking to a bot or a real person, do not argue: say you are on the FADC team here in the chat and offer to get them on a quick call with someone right away. That is both honest and the fastest way to close, people who ask that question are usually ready to buy and just want a human voice.
+const SYSTEM_PROMPT = `You are replying to customers on the Facebook Messenger inbox of Vonkam Home Services, a family-owned air duct, dryer vent and chimney cleaning company. You write as a member of the office team, the same way Michel writes. Write naturally and never bring up AI, automation or "the system", but never claim to be a specific human being either, and never deny being an assistant. If someone asks whether they are talking to a bot or a real person, do not argue: say you are on the FADC team here in the chat and offer to get them on a quick call with someone right away. That is both honest and the fastest way to close, people who ask that question are usually ready to buy and just want a human voice.
 
 ## Your job
 Get the customer from "replied to the ad" to a qualified appointment request, then hand off. A qualified request has ALL of:
@@ -147,7 +147,7 @@ Count HEATING/AC SYSTEMS, not units or square feet. A 2-family house with one sh
 - Hours: ${HOURS}.
 - Openings start the next working day.
 - The technician calls the customer the same day of the appointment with his ETA.
-- Phone: (617) 830-9808. Offer it only if they ask to call or seem to prefer calling.
+- Phone: (617) 812-5319. Offer it only if they ask to call or seem to prefer calling.
 
 ## Special pricing, hand these to a human, never quote a discount yourself
 Our best closes come from a person offering the right package. You must recognize these and hand off warmly, never quote a plain per-system total and never invent a discount:
@@ -457,8 +457,8 @@ const COPY: Record<string, Pair> = {
     es: "Claro, t\u00f3mate tu tiempo. Y sin dep\u00f3sito, pagas el d\u00eda del servicio, as\u00ed que aqu\u00ed estamos cuando quieras.",
   },
   callOffer: {
-    en: "I'm on the FADC team here in the chat, but honestly it's quicker by phone. Want a quick call? Send me your best number and someone will ring you in a few minutes.",
-    es: "Soy del equipo de FADC, aquí en el chat, pero la verdad por teléfono es más rápido. ¿Te marcamos? Mándame tu mejor número y alguien te llama en unos minutos.",
+    en: "I'm on the Vonkam team here in the chat, but honestly it's quicker by phone. Want a quick call? Send me your best number and someone will ring you in a few minutes.",
+    es: "Soy del equipo de Vonkam, aquí en el chat, pero la verdad por teléfono es más rápido. ¿Te marcamos? Mándame tu mejor número y alguien te llama en unos minutos.",
   },
 };
 
@@ -478,7 +478,7 @@ const callLine = (es: boolean, phone: string | null, reason: "unknown" | "human"
   if (phone) {
     return es
       ? `Soy del equipo de FADC, aquí en el chat, y por teléfono es más rápido. Alguien te marca al ${phone} en unos minutos, ¿te funciona?`
-      : `I'm on the FADC team here in the chat, and it's quicker by phone. Someone will call you at ${phone} in a few minutes, does that work?`;
+      : `I'm on the Vonkam team here in the chat, and it's quicker by phone. Someone will call you at ${phone} in a few minutes, does that work?`;
   }
   return es ? COPY.callOffer.es : COPY.callOffer.en;
 };
