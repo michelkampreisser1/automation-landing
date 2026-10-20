@@ -775,27 +775,41 @@ function prettyWindow(w: string, es: boolean): string {
 // The next slot we are willing to offer, as a phrase. Null when the rule yields nothing.
 type Slot = { phrase: string; day: string; window: string };
 
-async function nextSlot(es: boolean, avoid: string[] = []): Promise<Slot | null> {
+// THE PREFERRED WINDOW (found 20 oct). Gary said "Afternoon" at 2:13pm; one minute later the
+// bot offered "Thursday 9 to 11", then "Wednesday 9 to 11" — mornings, and Wednesday was a day
+// he had already turned down. preferred_window was stored correctly the whole time; nothing read
+// it. The window is now a first-class filter: look for the window they asked for across every
+// open day first, and only widen to the other windows if that search comes back empty.
+async function nextSlot(
+  es: boolean,
+  avoid: string[] = [],
+  prefer: string | null = null,
+): Promise<Slot | null> {
   const a = await loadAvailability();
+  const want = prefer ? windowBucket(prefer, a.windows) : null;
+  // Pass 1 honours the stated window. Pass 2 only runs when pass 1 found nothing at all.
+  const passes: (string[])[] = want ? [[want], a.windows] : [a.windows];
   const base = bostonToday();
-  for (let i = Math.max(1, a.lead_time_days); i <= a.max_days_out; i++) {
-    const d = new Date(base.getTime() + i * 86_400_000);
-    if (!a.days.includes(DAY_ABBR[d.getUTCDay()])) continue;
-    // DECLINED SLOTS (8 oct). A lead who says "Working Friday" to "Friday 9 to 11" must never be
-    // offered Friday again. Entries are either a full "Friday 10/9" or a bare weekday "Friday".
-    const dayStr = `${DAY_EN[d.getUTCDay()]} ${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
-    if (avoid.some((x) => x.toLowerCase() === dayStr.toLowerCase() || x.toLowerCase() === DAY_EN[d.getUTCDay()].toLowerCase())) continue;
-    const used = await slotLoad(isoDate(d));
-    const raw = a.windows.find((w) => (used[w] ?? 0) < a.max_per_window);
-    if (!raw) continue;
-    const w = prettyWindow(raw, es);
-    return {
-      phrase: es ? `el ${DAY_ES[d.getUTCDay()]} ${w}` : `${DAY_EN[d.getUTCDay()]} ${w}`,
-      // The date rides along with the day name. "Wednesday" offered on a Tuesday night and
-      // accepted on Wednesday morning used to resolve to the FOLLOWING Wednesday.
-      day: `${DAY_EN[d.getUTCDay()]} ${d.getUTCMonth() + 1}/${d.getUTCDate()}`,
-      window: raw,
-    };
+  for (const windows of passes) {
+    for (let i = Math.max(1, a.lead_time_days); i <= a.max_days_out; i++) {
+      const d = new Date(base.getTime() + i * 86_400_000);
+      if (!a.days.includes(DAY_ABBR[d.getUTCDay()])) continue;
+      // DECLINED SLOTS (8 oct). A lead who says "Working Friday" to "Friday 9 to 11" must never be
+      // offered Friday again. Entries are either a full "Friday 10/9" or a bare weekday "Friday".
+      const dayStr = `${DAY_EN[d.getUTCDay()]} ${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
+      if (avoid.some((x) => x.toLowerCase() === dayStr.toLowerCase() || x.toLowerCase() === DAY_EN[d.getUTCDay()].toLowerCase())) continue;
+      const used = await slotLoad(isoDate(d));
+      const raw = windows.find((w) => (used[w] ?? 0) < a.max_per_window);
+      if (!raw) continue;
+      const w = prettyWindow(raw, es);
+      return {
+        phrase: es ? `el ${DAY_ES[d.getUTCDay()]} ${w}` : `${DAY_EN[d.getUTCDay()]} ${w}`,
+        // The date rides along with the day name. "Wednesday" offered on a Tuesday night and
+        // accepted on Wednesday morning used to resolve to the FOLLOWING Wednesday.
+        day: `${DAY_EN[d.getUTCDay()]} ${d.getUTCMonth() + 1}/${d.getUTCDate()}`,
+        window: raw,
+      };
+    }
   }
   return null;
 }
@@ -1732,7 +1746,7 @@ async function processAttachment(input: {
             first_name = coalesce(fadc.leads.first_name, excluded.first_name),
             last_name  = coalesce(fadc.leads.last_name,  excluded.last_name)
       returning id, stage, agent_paused, first_name, service, zip, town, phone,
-                preferred_day, preferred_window, address`;
+                preferred_day, preferred_window, address, declined_slots`;
     leadId = lead.id;
 
     // Register alt PSID if different from primary
@@ -1771,7 +1785,12 @@ async function processAttachment(input: {
     // so a sticker anywhere in the set disqualifies the photo copy even if detection upstream missed.
     const isPhoto = att.kinds.some((k) => k === "image" || k === "video") &&
       !att.kinds.includes("sticker");
-    const slotObj = await nextSlot(es);
+    // A thumbs-up used to re-offer a day the customer had already refused, in the wrong window.
+    const slotObj = await nextSlot(
+      es,
+      Array.isArray(lead.declined_slots) ? (lead.declined_slots as string[]) : [],
+      (lead.preferred_window as string | null) ?? null,
+    );
     const slot = slotObj?.phrase ?? null;
     const ask = nextAskLine(lead as unknown as Record<string, unknown>, undefined, es, slot);
     const reply = ask
@@ -1966,7 +1985,7 @@ async function processInbound(input: {
       ? [...new Set([...declinedBefore, String(lead.offered_day), ...weekdaysIn(text)])]
       : declinedBefore;
     const refusedTwice = declinedNow && declinedAll.filter((x) => /\d/.test(x)).length >= 2;
-    const slotObj = refusedTwice ? null : await nextSlot(es, declinedAll);
+    const slotObj = refusedTwice ? null : await nextSlot(es, declinedAll, (lead.preferred_window as string | null) ?? null);
     const slot = slotObj?.phrase ?? null;
 
     const isEmergency = hitEmergency(text);
@@ -3168,7 +3187,7 @@ async function runFollowups(dryRun: boolean): Promise<Record<string, unknown>> {
       history.reverse();
       const hist = history as { role: string; text: string }[];
       const fuEs = isSpanish(hist.filter((m) => m.role === "customer").map((m) => m.text).join("\n"));
-      const fuSlotObj = r.preferred_day ? null : await nextSlot(fuEs, r.declined_slots ?? []);
+      const fuSlotObj = r.preferred_day ? null : await nextSlot(fuEs, r.declined_slots ?? [], r.preferred_window ?? null);
       const fuSlot = fuSlotObj?.phrase ?? null;
       const convo = [...hist,
         { role: "customer", text: FOLLOWUP_INSTRUCTION(r, Math.round(r.silence_hours), fuSlot) }];
