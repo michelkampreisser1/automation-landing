@@ -3289,7 +3289,35 @@ async function runFollowups(dryRun: boolean): Promise<Record<string, unknown>> {
       // so mark it failed rather than leaving a ghost "sent" record, then stop and hand it to a
       // person once. (Jennifer Judge gave 551 with a different subcode the same day — the
       // subcodes vary, the 551 does not, so match on the code and the sentence, not the subcode.)
-      if (/cannot send messages to this id|isn.?t available right now|\(#551\)/i.test(msg)) {
+      // THE 24-HOUR WINDOW (found 20 oct). "(#10) This message is sent outside of allowed
+      // window" was missing from the test below, so those leads matched the query again every
+      // single run: lead 6c116b6a took 19 retries in 38 hours, 18 of them today, one every ten
+      // minutes, each one paying for a model call before Meta refused it. Nothing reached the
+      // customer. Two other code paths already knew about this error; this one did not.
+      //
+      // #10 is NOT permanent the way #100 and #551 are — the window reopens the moment the
+      // customer writes again. So it stops the nudges and hands the lead to a person, but
+      // leaves the agent live so a reply still gets answered.
+      if (/outside of allowed window|\(#10\)|24.?hour/i.test(msg)) {
+        try {
+          await sql`update fadc.messages set sent_by = 'followup_failed', text = '[NOT SENT] ' || text where id = ${fuMsgRow?.id ?? null}`;
+        } catch (_) { /* ignore */ }
+        const [lead10] = await sql`select needs_human, no_followup_until from fadc.leads where id = ${r.id}`;
+        await sql`update fadc.leads
+                    set needs_human = true,
+                        no_followup_until = now() + interval '30 days',
+                        updated_at = now()
+                  where id = ${r.id}`;
+        if (!lead10?.needs_human && !lead10?.no_followup_until) {
+          await notifyTeam(
+            `\u{23F0} The Messenger window closed on ${r.first_name ?? "this lead"} — 24h since they last wrote, ` +
+            `so Meta refuses any new message. Nudges stopped; the bot still answers if they write back.\n` +
+            (r.phone ? `\u{1F4DE} The phone is the only way in: ${r.phone}.` : "No phone on file — no other way to reach them.") + "\n" +
+            `${[r.service, r.town, r.zip].filter(Boolean).join(", ")}`,
+            "window_closed",
+          );
+        }
+      } else if (/cannot send messages to this id|isn.?t available right now|\(#551\)/i.test(msg)) {
         try {
           await sql`update fadc.messages set sent_by = 'followup_failed', text = '[NOT SENT] ' || text where id = ${fuMsgRow?.id ?? null}`;
         } catch (_) { /* ignore */ }
