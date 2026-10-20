@@ -874,6 +874,30 @@ const hitAccept = (t: string) =>
 // a proper look on site", twice, to a thumbs-up. A like is a yes, and goes to the agent as one.
 const LIKE_STICKERS = new Set(["369239263222822", "369239343222814", "369239383222810"]);
 
+// THE THUMBS-UP, SECOND PASS (found 20 oct). The 7 oct fix only read msg.sticker_id, and Meta
+// does not always put it there: the like button arrives as TWO attachments, "image" + "sticker",
+// with the id nested in the payload or only inside the image URL. describeAttachments saw the
+// "image" and the customer got "Got the photo, thank you!" for a thumbs-up, 13 times in 3 weeks.
+// Read every place the id can hide before deciding a message is a file.
+function pickStickerId(msg: Record<string, any>): string | null {
+  const read = (v: unknown) =>
+    v === undefined || v === null || String(v).trim() === "" ? null : String(v).trim();
+  const top = read(msg?.sticker_id);
+  if (top) return top;
+  const atts: any[] = Array.isArray(msg?.attachments) ? msg.attachments : [];
+  for (const a of atts) {
+    const nested = read(a?.payload?.sticker_id);
+    if (nested) return nested;
+  }
+  // The like often carries its id only in the rendered image URL.
+  for (const a of atts) {
+    const u = String(a?.payload?.url ?? "");
+    for (const id of LIKE_STICKERS) if (u.includes(id)) return id;
+  }
+  // No id anywhere, but Meta typed one of the parts "sticker": still a reaction, not a photo.
+  return atts.some((a) => String(a?.type ?? "").toLowerCase() === "sticker") ? "unknown" : null;
+}
+
 // A time the customer can answer the PHONE. Never the time for the job.
 const CALL_CONTEXT_RE =
   /\b(in a meeting|at work|working until|busy until|free after|available after|reach me after|call (me |us )?(back|today|tomorrow)?\s*(after|at|past)\b|give me a call after|i'?ll be (done|free|out) (at|after|by)|done after|off work|get out at)\b/i;
@@ -1743,7 +1767,10 @@ async function processAttachment(input: {
     const es = isSpanish((prior as { role: string; text: string }[])
       .filter((m) => m.role === "customer").map((m) => m.text).join("\n"));
     const say = (p: Pair) => (es ? p.es : p.en);
-    const isPhoto = att.kinds.some((k) => k === "image" || k === "video");
+    // A like arrives as "image" + "sticker" together. The image is the sticker drawn, not a photo,
+    // so a sticker anywhere in the set disqualifies the photo copy even if detection upstream missed.
+    const isPhoto = att.kinds.some((k) => k === "image" || k === "video") &&
+      !att.kinds.includes("sticker");
     const slotObj = await nextSlot(es);
     const slot = slotObj?.phrase ?? null;
     const ask = nextAskLine(lead as unknown as Record<string, unknown>, undefined, es, slot);
@@ -3817,9 +3844,11 @@ async function handle(req: Request): Promise<Response> {
 
           // Text, attachments, or both. Only delivery/read receipts and postbacks are skipped.
           const hasText0 = typeof msg.text === "string" && msg.text.trim().length > 0;
-          if (!hasText0 && msg.sticker_id) {
+          const stickerId = pickStickerId(msg);
+          if (!hasText0 && stickerId) {
             // A sticker is a reaction, not a file: never "got the photo", never an attachment alert.
-            msg.text = LIKE_STICKERS.has(String(msg.sticker_id)) ? "\u{1F44D}" : "[sent a sticker]";
+            // An unrecognised sticker is NOT read as a yes: only the three like ids are.
+            msg.text = LIKE_STICKERS.has(stickerId) ? "\u{1F44D}" : "[sent a sticker]";
             msg.attachments = [];
           }
           const att = describeAttachments(msg);
