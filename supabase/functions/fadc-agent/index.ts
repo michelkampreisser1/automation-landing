@@ -1871,6 +1871,32 @@ async function processInbound(input: {
       return { reply: "", stage: lead.stage, needs_human: true, paused: true };
     }
 
+    // 3c. THEY ASKED US TO STOP. Acknowledge once, then never again. The pause and the
+    // far-future no_followup_until are two separate locks on the same door, because the
+    // followup cron reads the second one and not the first. needs_human stays false: this
+    // is a clean exit, not a problem for someone to solve.
+    if (STOP_RE.test(text)) {
+      await sql`update fadc.leads
+                   set agent_paused = true,
+                       stage = 'closed_lost',
+                       no_followup_until = now() + interval '100 years',
+                       updated_at = now()
+                 where id = ${leadId}`;
+      await notifyTeam(
+        `\u{1F6D1} ${lead.first_name ?? "A lead"} asked us to stop:\n"${text.slice(0, 160)}"\n\u2192 Agent is off for them permanently. Do not message them again.`,
+        "opt_out",
+      );
+      const es = isSpanish(text);
+      return {
+        reply: es
+          ? "Entendido, no te vuelvo a escribir. Si algún día nos necesitas, aquí estamos."
+          : "Got it — I won't message you again. If you ever need us, we're here.",
+        stage: "closed_lost",
+        needs_human: false,
+        paused: true,
+      };
+    }
+
     // 4. History + typing indicator in parallel (speed: customer sees "typing..." immediately)
     const [history] = await Promise.all([
       sql`select role, text from fadc.messages where lead_id = ${leadId}
@@ -3013,6 +3039,15 @@ async function runTicketSweep(dryRun: boolean): Promise<Record<string, unknown>>
 
 const REVIEWS_LINK = "https://www.facebook.com/profile.php?id=61593572532326&sk=reviews";
 // Someone who had a bad time gets a person, never a review link.
+// Someone asking us to stop is the one message we must never answer with another pitch.
+// One lead wrote "Stop" on 18 oct, "No" on the 19th, and "Please stop" on the 20th, and the
+// followup cron kept going the whole time: nine people had asked, and seven of them got
+// another message afterwards. Meta restricts Pages for exactly this, and it only takes one
+// spam report. Narrow on purpose: "stop by", "non-stop" and "the dryer stopped" are not
+// opt-outs, so the word has to open the message or carry a verb that makes it a request.
+const STOP_RE =
+  /(^\s*stop\b(?!\s+(by|in|over|at)\b))|(^\s*(unsubscribe|basta)\b)|\b(please stop|stop (messaging|texting|contacting|writing|calling|sending)|unsubscribe|leave me alone|(don'?t|do not|never) (contact|message|text|write) me|(remove|take) me off|opt me out)\b|(ya no me (escrib|contact|mand|llam))|(dej(en|a|e)n? de (escribir|mandar|molestar|llamar))|(^\s*no me escrib)/i;
+
 const BAD_EXPERIENCE_RE =
   /\b(terrible|horrible|awful|bad|worst|disgusting|rip.?off|scam|complain|refund|disappointed|angry|furious|never again|no good|do not recommend|don.?t recommend|malo|p[eé]simo|asco|estafa|queja|reembolso|decepcionado|enojado|nunca m[aá]s)\b/i;
 
