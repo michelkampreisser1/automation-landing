@@ -169,16 +169,33 @@ Deno.serve(async (req: Request) => {
     for (const [label, token] of TOKENS) {
       if (!token) { results[label] = "not configured"; continue; }
       try {
+        // This has to be the SAME call shape the real pull uses. The old probe asked for
+        // "spend" with date_preset=yesterday and came back OK on 21 oct while the actual
+        // job was writing zeros — a narrower request can succeed where the real one is
+        // served without its paid fields, so a probe that does not match proves nothing.
         const u = new URL(`${GRAPH}/${ACCOUNT}/insights`);
-        u.searchParams.set("fields", "spend");
-        u.searchParams.set("date_preset", "yesterday");
+        u.searchParams.set("level", "account");
+        u.searchParams.set("time_increment", "1");
+        u.searchParams.set("time_range", JSON.stringify({ since: daysAgoNY(2), until: daysAgoNY(1) }));
+        u.searchParams.set("fields", "spend,impressions,actions,date_start");
         const r = await fetch(u.toString(), {
           headers: { Authorization: `Bearer ${token}` },
         });
         const b = await r.json().catch(() => ({}));
-        results[label] = (r.ok && !b?.error)
-          ? "OK — can read ad insights"
-          : `DENIED — ${b?.error?.message ?? `HTTP ${r.status}`}`;
+        if (!r.ok || b?.error) {
+          results[label] = `DENIED — ${b?.error?.message ?? `HTTP ${r.status}`}`;
+        } else {
+          // Reaching the endpoint is not the same as being served the money. Report
+          // whether the paid fields actually came back, which is the thing that broke.
+          const d = (b?.data ?? []) as Array<Record<string, unknown>>;
+          const hasPaidFields = d.some((x) => x.spend !== undefined && x.impressions !== undefined);
+          const hasActivity = d.some((x) => Array.isArray(x.actions) && (x.actions as unknown[]).length > 0);
+          results[label] = hasPaidFields
+            ? "OK — returns spend and impressions"
+            : d.length === 0
+            ? "OK — reachable, but no rows in window (cannot confirm paid fields)"
+            : `PARTIAL — reachable${hasActivity ? " and returns actions" : ""} but NO spend/impressions. This token cannot see the account's money.`;
+        }
       } catch (e) {
         results[label] = `ERROR — ${e instanceof Error ? e.message : String(e)}`;
       }
@@ -221,7 +238,26 @@ Deno.serve(async (req: Request) => {
 
     const { rows, tokenUsed, errors } = await fetchInsights(from, to);
 
-    for (const r of rows) {
+    // THE LEDGER THAT LIED (found 21 oct). From 17 oct this job wrote spend $0.00 and
+    // 0 impressions every four hours while reporting ok:true — and Meta was charging the
+    // card the whole time ($79 on the 16th, $133 on the 19th, $89.71 still outstanding).
+    // A week of unit economics was computed against a ledger short by roughly $180.
+    //
+    // The tell was in the data all along: rows with 15 link_clicks and 0 impressions.
+    // That combination cannot occur in real Meta data — nobody clicks an ad that was
+    // never shown. It means the response came back without the paid fields, which is what
+    // happens when graphGet silently falls through to META_PAGE_TOKEN: a Page token still
+    // sees messaging actions attributed to the Page, but never the ad account's money.
+    //
+    // So: a row that reports activity with no impressions is not written at all. Good rows
+    // still land, the run is marked failed with the token named, and a notification goes
+    // out, because the first failure mode here was being quiet.
+    const corrupt = rows.filter((r) =>
+      r.impressions === 0 && r.spend === 0 && (r.link_clicks > 0 || r.conversations > 0)
+    );
+    const sane = rows.filter((r) => !corrupt.includes(r));
+
+    for (const r of sane) {
       await sql`
         insert into fadc.ad_spend
           (day, account_id, spend, impressions, link_clicks, conversations, is_final, fetched_at)
@@ -238,9 +274,33 @@ Deno.serve(async (req: Request) => {
       `;
     }
 
+    if (corrupt.length) {
+      const days = corrupt.map((r) => r.day).join(", ");
+      const detail =
+        `Meta returned activity with no impressions for ${days} (token: ${tokenUsed}). ` +
+        `Those days were NOT written, the ledger keeps its last good numbers. ` +
+        `Spend is understated until this is fixed — check real spend in Ads Manager billing.`;
+      await sql`
+        insert into fadc.spend_runs (days_from, days_to, rows_upsert, ok, error)
+        values (${from}, ${to}, ${sane.length}, false, ${detail})
+      `;
+      // Once a day at most: this cron runs every 4 hours and the same broken token would
+      // otherwise produce six identical alerts before breakfast.
+      const [recent] = await sql`
+        select 1 from fadc.notifications
+         where kind = 'spend_ledger_broken' and created_at > now() - interval '20 hours' limit 1`;
+      if (!recent) {
+        await sql`
+          insert into fadc.notifications (kind, text)
+          values ('spend_ledger_broken', ${"\u{1F4B8} Ad spend ledger is not recording. " + detail})`;
+      }
+      await heartbeat(sql, "fadc_ad_spend", false, detail);
+      return json({ ok: false, error: detail, token_used: tokenUsed, token_errors: errors, written: sane.length, skipped: corrupt }, 500);
+    }
+
     await sql`
       insert into fadc.spend_runs (days_from, days_to, rows_upsert, ok)
-      values (${from}, ${to}, ${rows.length}, true)
+      values (${from}, ${to}, ${sane.length}, true)
     `;
 
     await heartbeat(sql, "fadc_ad_spend", true);
