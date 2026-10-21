@@ -46,6 +46,12 @@ const TWILIO_TOKEN = Deno.env.get("TWILIO_AUTH_TOKEN") ?? "";
 const TWILIO_FROM = Deno.env.get("TWILIO_WA_FROM") ?? "whatsapp:+13055264093"; // 305 number
 const AFEK_WA = Deno.env.get("AFEK_WA_NUMBER") ?? "whatsapp:+16178309808";     // Afek's WhatsApp
 
+// Twilio plain SMS — used for cold outreach to technician prospects (runTechnicianOutreach).
+// This is Michel's own recruiting line, already used manually for this exact purpose
+// (see claude/plan-30-dias-red-tecnicos-14oct-2026.md), forwarded to his cell.
+const TWILIO_SMS_FROM = Deno.env.get("TWILIO_SMS_FROM") ?? "+16178125319"; // 617 number
+const TECH_OUTREACH_DAILY_CAP = Number(Deno.env.get("TECH_OUTREACH_DAILY_CAP") ?? "6");
+
 // Safety kill-switch: while false (default), the agent still receives, qualifies and
 // logs every lead normally, but NEVER actually sends a Messenger reply to a real person.
 // Set the BOT_LIVE_MODE secret to the exact string "true" only once Michel has reviewed
@@ -3341,6 +3347,67 @@ async function runStaleAppointments(dryRun: boolean): Promise<Record<string, unk
   };
 }
 
+// v130: cold SMS outreach to technician_pipeline (fadc.technicians) prospects — daily, capped,
+// B2B-hours-only, and intentionally NOT auto-sent to customers (see runStaleAppointments /
+// runAmountChase for the customer-facing watchers, which still go through Messenger). Michel
+// asked for a system that texts technician prospects for him instead of him sending by hand;
+// this is scoped to technicians only because a cold text to a customer carries brand risk a
+// text to a prospective subcontractor doesn't.
+function insideOutreachHours(): boolean {
+  const { weekday, hour } = bostonNow();
+  const isWeekday = !["Sat", "Sun"].includes(weekday);
+  // Narrower than customer follow-up hours on purpose: a B2B cold text at 9:05am or 6:45pm
+  // reads as a telemarketer. 10am-5pm Mon-Fri only.
+  return isWeekday && hour >= 10 && hour < 17;
+}
+
+async function runTechnicianOutreach(dryRun: boolean): Promise<Record<string, unknown>> {
+  if (!dryRun && !insideOutreachHours()) {
+    return { ok: true, sent: 0, reason: "outside outreach hours", boston: bostonNow() };
+  }
+  const rows = await sql<{ id: string; name: string; base_town: string | null; phone: string | null }[]>`
+    select id, name, base_town, phone
+    from fadc.technicians
+    where stage = 'prospect'
+      and contacted_at is null
+      and opted_out = false
+      and phone is not null
+    order by created_at asc
+    limit ${TECH_OUTREACH_DAILY_CAP}
+  `;
+
+  const results: Array<Record<string, unknown>> = [];
+  for (const r of rows) {
+    const town = r.base_town ? ` in the ${r.base_town} area` : "";
+    const msg = `Hi, this is Michel with Vonkam Home Services (air duct/dryer vent, MA). `
+      + `We have duct & vent jobs already sold and scheduled${town} and need a sub to run them `
+      + `-- customer pays you on site, same day, you keep 60%. Interested? Reply YES and I'll call you. `
+      + `Reply STOP to opt out.`;
+    if (dryRun) {
+      results.push({ id: r.id, name: r.name, phone: r.phone, would_send: msg });
+      continue;
+    }
+    const send = await sendSMS(r.phone!, msg);
+    if (send.ok) {
+      await sql`update fadc.technicians
+                 set contacted_at = now(), sms_sent_at = now(), sms_attempts = sms_attempts + 1
+                 where id = ${r.id}`;
+    }
+    results.push({ id: r.id, name: r.name, phone: r.phone, sent: send.ok, error: send.error });
+  }
+
+  const sentOk = results.filter((x) => x.sent);
+  if (sentOk.length > 0) {
+    const names = sentOk.map((x) => x.name).join(", ");
+    await notifyTeam(`📞 Texted ${sentOk.length} technician prospect${sentOk.length === 1 ? "" : "s"} today: ${names}`, "tech_outreach");
+  }
+  const failed = results.filter((x) => x.sent === false);
+  if (failed.length > 0) {
+    await notifyTeam(`⚠️ ${failed.length} technician text(s) failed to send: ${failed.map((x) => `${x.name} (${x.error})`).join("; ")}`, "tech_outreach_error");
+  }
+  return { ok: true, candidates: rows.length, sent: sentOk.length, dry_run: dryRun, results };
+}
+
 async function runFollowups(dryRun: boolean): Promise<Record<string, unknown>> {
   if (!dryRun && !insideFollowupHours()) {
     return { ok: true, sent: 0, reason: "outside business hours", boston: bostonNow() };
@@ -3706,6 +3773,31 @@ async function sendWhatsApp(body: string): Promise<{ ok: boolean; sid?: string; 
   if (!TWILIO_SID || !TWILIO_TOKEN) return { ok: false, error: "twilio creds not set" };
   try {
     const params = new URLSearchParams({ From: TWILIO_FROM, To: AFEK_WA, Body: body });
+    const res = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Authorization: `Basic ${btoa(`${TWILIO_SID}:${TWILIO_TOKEN}`)}`,
+        },
+        body: params.toString(),
+      },
+    );
+    const json = await res.json();
+    if (res.ok) return { ok: true, sid: json.sid };
+    return { ok: false, error: json.message ?? `HTTP ${res.status}` };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+// Send a plain SMS via Twilio from Michel's own 617 recruiting line.
+// Silently skips if creds are not set — same guard as sendWhatsApp above.
+async function sendSMS(to: string, body: string): Promise<{ ok: boolean; sid?: string; error?: string }> {
+  if (!TWILIO_SID || !TWILIO_TOKEN) return { ok: false, error: "twilio creds not set" };
+  try {
+    const params = new URLSearchParams({ From: TWILIO_SMS_FROM, To: to, Body: body });
     const res = await fetch(
       `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`,
       {
@@ -4216,6 +4308,21 @@ async function handle(req: Request): Promise<Response> {
   }
 
   // --- Follow-up runner (pg_cron via x-fadc-cron, or Michel via x-fadc-secret) ---
+  if (body.action === "technician_outreach") {
+    const bySecret = !!WEBHOOK_SECRET && req.headers.get("x-fadc-secret") === WEBHOOK_SECRET;
+    const byCron = await cronSecretOk(req.headers.get("x-fadc-cron"));
+    if (!bySecret && !byCron) return json(401, { error: "unauthorized" });
+    try {
+      const result = await runTechnicianOutreach(body.dry_run === true);
+      await heartbeat("fadc_technician_outreach", true);
+      return json(200, result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await heartbeat("fadc_technician_outreach", false, msg);
+      return json(500, { ok: false, error: msg });
+    }
+  }
+
   if (body.action === "followups") {
     const bySecret = !!WEBHOOK_SECRET && req.headers.get("x-fadc-secret") === WEBHOOK_SECRET;
     const byCron = await cronSecretOk(req.headers.get("x-fadc-cron"));
