@@ -28,6 +28,10 @@ const JOBS: Record<string, number> = {
   fadc_closeout_ask:   1500,   // runs daily at 21:00 & 22:00 → stale after 25 h
   fadc_closeout_remind: 1500,  // runs daily at 00:00 & 01:00 → stale after 25 h
   fadc_weekly_summary: 10200,  // runs Wed 12:00     → stale after 7 d + 2 h (10200 min)
+  // v131: technician SMS outreach — runs daily weekdays 10:30am ET, but can legitimately
+  // no-op some days once contacted_at is null for nobody left (cap reached, or list empty).
+  // Same daily-job threshold as closeout: only alert once a whole day+buffer has passed.
+  fadc_technician_outreach: 1500,
 };
 
 const REALERT_MINUTES = 60;
@@ -201,6 +205,7 @@ Deno.serve(async (req: Request) => {
             fadc_closeout_ask:     "Pregunta de cierre al cliente",
             fadc_closeout_remind:  "Recordatorio de cierre",
             fadc_weekly_summary:   "Resumen semanal",
+            fadc_technician_outreach: "SMS a técnicos prospecto",
           };
           parts.push(
             `🔴 El bot tiene ${stale.length} tarea(s) caída(s):\n` +
