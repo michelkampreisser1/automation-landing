@@ -3124,15 +3124,24 @@ const BAD_EXPERIENCE_RE =
 // open (last_inbound_at < 23h).  Their reply resets the window and
 // triggers the review-request intercept in processInbound.
 async function runReviewFollowups(dryRun: boolean): Promise<Record<string, unknown>> {
-  const rows = await sql<{ id: string; messenger_id: string; first_name: string | null; lead_id: string }[]>`
-    select a.id, l.messenger_id, l.first_name, l.id as lead_id
+  const rows = await sql<{ id: string; messenger_id: string; first_name: string | null; lead_id: string; phone: string | null; ticket_amount: string | null }[]>`
+    select a.id, l.messenger_id, l.first_name, l.id as lead_id, l.phone, a.ticket_amount
     from fadc.appointments a
     join fadc.leads l on l.id = a.lead_id
     where a.outcome_reason = 'done'
-      and a.closed_at between now() - interval '24 hours' and now() - interval '2 hours'
+      -- WHY THIS WINDOW IS 7 DAYS AND NOT 24 HOURS (21 oct). The old bound was
+      -- "closed 2-24h ago", which assumed the job gets closed out the same day it
+      -- happens. It does not: close-outs here land days late, so by the time
+      -- outcome_reason became 'done' the lead had already aged out and was never
+      -- asked. Jose Archila left a $270 tip and was never asked for a review.
+      and a.closed_at between now() - interval '7 days' and now() - interval '2 hours'
       and l.review_requested = false
       and l.review_followup_at is null
-      and l.last_inbound_at > now() - interval '23 hours'
+      -- The 23h "is the Meta window still open?" gate used to live here and was the
+      -- real reason this cron almost never fired: a job closed out a day late always
+      -- failed it, silently and permanently. We now ATTEMPT the send and handle the
+      -- (#10) closed-window error below, which turns an unreachable customer into a
+      -- notification Michel can act on by text instead of a lead that vanishes.
       and l.messenger_id is not null
   `;
   if (rows.length === 0) return { ok: true, sent: 0, reason: "no eligible review leads" };
@@ -3155,10 +3164,34 @@ async function runReviewFollowups(dryRun: boolean): Promise<Record<string, unkno
       results.push({ lead_id: r.lead_id, name: r.first_name, would_send: msg });
       continue;
     }
-    await sql`insert into fadc.messages (lead_id, role, text, sent_by) values (${r.lead_id}, 'agent', ${msg}, 'review_followup')`;
-    await sendMessengerReply(r.messenger_id, msg);
-    await sql`update fadc.leads set review_followup_at = now(), review_requested = true where id = ${r.lead_id}`;
-    results.push({ lead_id: r.lead_id, name: r.first_name, sent: true });
+    const [reviewMsgRow] = await sql<{ id: string }[]>`
+      insert into fadc.messages (lead_id, role, text, sent_by)
+      values (${r.lead_id}, 'agent', ${msg}, 'review_followup') returning id`;
+    try {
+      await sendMessengerReply(r.messenger_id, msg);
+      await sql`update fadc.leads set review_followup_at = now(), review_requested = true where id = ${r.lead_id}`;
+      results.push({ lead_id: r.lead_id, name: r.first_name, sent: true });
+    } catch (e) {
+      // The customer's 24h Meta window shut before we closed the job out. The ask is still
+      // worth making, it just has to leave by text instead, so this becomes a notification
+      // with the number in it rather than a review we quietly never requested. review_requested
+      // is still set: without it this lead comes back every single cron run and re-notifies.
+      const em = String((e as Error)?.message ?? e);
+      const windowClosed = /outside of allowed window|\(#10\)|24.?hour/i.test(em);
+      await sql`update fadc.messages set sent_by = 'review_failed', text = '[NOT SENT] ' || text
+                 where id = ${reviewMsgRow?.id ?? null}`;
+      await sql`update fadc.leads set review_followup_at = now(), review_requested = true where id = ${r.lead_id}`;
+      if (windowClosed) {
+        const paid = r.ticket_amount ? ` (paid $${r.ticket_amount})` : "";
+        await notifyTeam(
+          `⭐ ${r.first_name ?? "A customer"}${paid} is due a review ask, but their Messenger window closed.\n` +
+          `${r.phone ? `Text them: ${r.phone}` : "No phone on file, check the thread."}\n\n` +
+          `Suggested: "Hi${r.first_name ? ` ${r.first_name}` : ""}! How did everything go? If the team took good care of you, a quick review helps a lot, and it gets you $20 off next time: ${REVIEWS_LINK}"`,
+          "review_window_closed",
+        );
+      }
+      results.push({ lead_id: r.lead_id, name: r.first_name, sent: false, error: em.slice(0, 120) });
+    }
   }
   return { ok: true, sent: results.filter((x: any) => x.sent).length, results };
 }
@@ -3172,7 +3205,14 @@ async function runFollowups(dryRun: boolean): Promise<Record<string, unknown>> {
            service, zip, town, phone, preferred_day, preferred_window, address, declined_slots,
            round(extract(epoch from (now() - last_inbound_at)) / 3600, 1)::float as silence_hours
     from fadc.leads
-    where stage in ('new', 'qualifying')
+    -- THE READY_TO_CONFIRM HOLE (found 21 oct). The nudge cron only ever covered 'new' and
+    -- 'qualifying', so the leads CLOSEST to booking — the ones who picked a service, gave a
+    -- ZIP and had a slot offered, and only had to say yes — got nothing. 12 of them were
+    -- sitting untouched when this was found, against 39 in 'qualifying' that were being
+    -- nudged. They are the cheapest bookings on the board and they were the only stage with
+    -- no follow-up at all. FOLLOWUP_INSTRUCTION already handles them: with every field
+    -- filled, "missing" comes back empty and the prompt asks them to confirm the slot.
+    where stage in ('new', 'qualifying', 'ready_to_confirm')
       and agent_paused = false
       and last_outbound_at is not null
       and last_inbound_at is not null
