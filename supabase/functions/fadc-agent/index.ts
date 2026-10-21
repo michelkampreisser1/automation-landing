@@ -1893,6 +1893,27 @@ async function processInbound(input: {
     // (Found in QA: a lead hits ready_to_confirm, gets paused, and their "can we move it"
     // then landed as a generic "replied" line nobody would act on.)
     if (lead.agent_paused) {
+      // A STOP FROM A PAUSED LEAD (found 20 oct). The opt-out test lives in 3c, below this
+      // early return, so a lead a human had taken over could say STOP and leave no trace:
+      // no closed_lost, no no_followup_until, just a generic "lead replied" line. All ten
+      // people who had asked us to stop were sitting with no_followup_until null, and two of
+      // them were still in a stage the followup cron reads — one un-pause away from being
+      // nudged again after saying Stop twice. The lock is recorded here regardless of pause.
+      // No reply goes out: a person is already in this thread and must not be talked over.
+      if (STOP_RE.test(text)) {
+        await sql`update fadc.leads
+                     set stage = 'closed_lost',
+                         no_followup_until = now() + interval '100 years',
+                         updated_at = now()
+                   where id = ${leadId}`;
+        await notifyTeam(
+          `\u{1F6D1} ${lead.first_name ?? "A lead"} asked us to stop:\n"${text.slice(0, 160)}"\n` +
+          `\u2192 Logged as a permanent opt-out. The bot was already paused on them, so nobody replied. ` +
+          `If you answer in the inbox, do not offer them anything.`,
+          "opt_out",
+        );
+        return { reply: "", stage: "closed_lost", needs_human: false, paused: true };
+      }
       if (hitReschedule(text)) {
         await notifyTeam(
           `🔄 RESCHEDULE REQUEST, act now\n${lead.first_name ?? "Lead"}\n📍 ${lead.address ?? lead.zip ?? "address unknown"}\n📞 ${lead.phone ?? "no phone"}\nCurrently booked: ${lead.preferred_day ?? "?"} ${lead.preferred_window ?? ""}\nThey wrote: "${text}"`,
@@ -3092,7 +3113,7 @@ const REVIEWS_LINK = "https://www.facebook.com/profile.php?id=61593572532326&sk=
 // spam report. Narrow on purpose: "stop by", "non-stop" and "the dryer stopped" are not
 // opt-outs, so the word has to open the message or carry a verb that makes it a request.
 const STOP_RE =
-  /(^\s*stop\b(?!\s+(by|in|over|at)\b))|(^\s*(unsubscribe|basta)\b)|\b(please stop|stop (messaging|texting|contacting|writing|calling|sending)|unsubscribe|leave me alone|(don'?t|do not|never) (contact|message|text|write) me|(remove|take) me off|opt me out)\b|(ya no me (escrib|contact|mand|llam))|(dej(en|a|e)n? de (escribir|mandar|molestar|llamar))|(^\s*no me escrib)/i;
+  /(^\s*stop\b(?!\s+(by|in|over|at)\b))|(^\s*(unsubscribe|basta)\b)|\b(please stop|stop (messaging|texting|contacting|writing|calling|sending)|unsubscribe|leave me alone|(don'?t|do not|never)\s+(ever\s+|again\s+)?(contact|message|text|msg|dm|write|reach out to|bother) me|(no more (messages|texts|texting|emails))|(quit|stop) (texting|messaging|contacting|bothering)|(remove|take) me off|opt me out)\b|(ya no me (escrib|contact|mand|llam))|(dej(en|a|e)n? de (escribir|mandar|molestar|llamar))|(^\s*no me escrib)/i;
 
 const BAD_EXPERIENCE_RE =
   /\b(terrible|horrible|awful|bad|worst|disgusting|rip.?off|scam|complain|refund|disappointed|angry|furious|never again|no good|do not recommend|don.?t recommend|malo|p[eé]simo|asco|estafa|queja|reembolso|decepcionado|enojado|nunca m[aá]s)\b/i;
