@@ -90,31 +90,58 @@ async function graphGet(path: string, params: Record<string, string>) {
   );
 }
 
+// ONE DAY PER CALL (found 21 oct). A single multi-day time_increment=1 request for
+// 14-21 oct came back with spend=0 and impressions=0 on every single day, including
+// days that had real money ($36.99 on the 17th, $49.14 on the 18th, $46.73 on the
+// 19th). "actions" still came through on every one of those rows, which is what made
+// the ledger's old corrupt-row filter effective at catching it (real activity with no
+// impressions cannot happen) but does not explain WHY it happened: re-querying each of
+// those exact same days one at a time, same token, same account, returned the correct
+// spend and impressions every time, no retry needed. Something about how Meta's
+// Insights endpoint assembles a wide time_increment=1 breakdown drops the paid fields;
+// asking for a single day at a time does not have that failure mode. The cost is one
+// Graph API call per day instead of one call for the whole range, which is fine at this
+// account's volume.
 async function fetchInsights(from: string, to: string) {
-  const { body, tokenUsed, errors } = await graphGet(`${ACCOUNT}/insights`, {
-    level: "account",
-    time_increment: "1",
-    time_range: JSON.stringify({ since: from, until: to }),
-    fields: "spend,impressions,actions,date_start",
-    limit: "100",
-  });
-
   const today = todayNY();
-  const rows: Row[] = (body.data ?? []).map((d: Record<string, unknown>) => {
+  const days: string[] = [];
+  for (let d = new Date(`${from}T00:00:00Z`); d <= new Date(`${to}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 1)) {
+    days.push(d.toISOString().slice(0, 10));
+  }
+
+  const rows: Row[] = [];
+  let tokenUsed = "";
+  const errors: string[] = [];
+
+  for (const day of days) {
+    const { body, tokenUsed: used, errors: dayErrors } = await graphGet(`${ACCOUNT}/insights`, {
+      level: "account",
+      time_range: JSON.stringify({ since: day, until: day }),
+      fields: "spend,impressions,actions,date_start",
+      limit: "10",
+    });
+    tokenUsed = used;
+    errors.push(...dayErrors);
+
+    const d = (body.data ?? [])[0] as Record<string, unknown> | undefined;
+    if (!d) {
+      // No row at all for this day (e.g. before the campaign existed, or a day with
+      // zero delivery) — that is a legitimate zero, not the corrupt-response pattern.
+      rows.push({ day, spend: 0, impressions: 0, link_clicks: 0, conversations: 0, is_final: day < today });
+      continue;
+    }
     const { conversations, linkClicks } = countActions(
       (d.actions ?? []) as Array<{ action_type: string; value: string }>,
     );
-    const day = String(d.date_start);
-    return {
+    rows.push({
       day,
       spend: Number(d.spend) || 0,
       impressions: Number(d.impressions) || 0,
       link_clicks: linkClicks,
       conversations,
-      // A day is only trustworthy once it has fully closed in the account's own day.
       is_final: day < today,
-    };
-  });
+    });
+  }
 
   return { rows, tokenUsed, errors };
 }
