@@ -3196,6 +3196,151 @@ async function runReviewFollowups(dryRun: boolean): Promise<Record<string, unkno
   return { ok: true, sent: results.filter((x: any) => x.sent).length, results };
 }
 
+// v87 — THE APPOINTMENT THAT WAS NEVER AN APPOINTMENT (found 21 oct). runLeakAlert watches
+// leads with NO appointment. The moment an appointment row exists, every watcher in this file
+// stops looking — and that is exactly where ten customers died. On 21 oct all eleven open
+// appointments had no technician assigned and nine had no date at all: Digna sat 13 days,
+// Mike 14, Ramiro 15, Duan 15.8. Every one of them was paused because a teammate had replied
+// once from the inbox and never came back, so no nudge could run either.
+//
+// The numbers that forced this: appointments WITH a tech assigned closed and got paid 2 of 3
+// times; appointments WITHOUT one did so 2 of 23. Assignment predicts revenue better than
+// zone, ad, service or price. Nothing was watching the single strongest predictor in the data.
+//
+// Two different failures live in one row, and they need different owners:
+//   - no DATE   → the customer can fix it, so ask them, but only while Meta's window is open.
+//   - no TECH   → only Michel can fix it; the customer must never be asked about dispatch.
+// A closed window means the customer is unreachable by Messenger forever, so that becomes a
+// phone number in a notification instead of a message that silently fails.
+async function runStaleAppointments(dryRun: boolean): Promise<Record<string, unknown>> {
+  const rows = await sql<{
+    id: string; lead_id: string; messenger_id: string | null; first_name: string | null;
+    phone: string | null; town: string | null; zip: string | null; service: string | null;
+    scheduled_at: string | null; tech: string | null; status: string;
+    date_chases: number; date_chased_at: string | null; dispatch_alerted_at: string | null;
+    declined_slots: string[] | null; preferred_window: string | null;
+    window_open: boolean; silence_hours: number;
+  }[]>`
+    select a.id, a.scheduled_at, a.tech, a.status, a.date_chases, a.date_chased_at,
+           a.dispatch_alerted_at,
+           l.id as lead_id, l.messenger_id, l.first_name, l.phone, l.town, l.zip, l.service,
+           l.declined_slots, l.preferred_window,
+           (l.last_inbound_at > now() - interval '22 hours') as window_open,
+           round(extract(epoch from (now() - l.last_inbound_at)) / 3600, 1)::float as silence_hours
+    from fadc.appointments a
+    join fadc.leads l on l.id = a.lead_id
+    where a.status in ('pending', 'rescheduled')
+      and (a.scheduled_at is null or a.tech is null)
+      -- A booking still being written by the live chat is not stale. Two hours is long
+      -- enough that the conversation has ended one way or the other.
+      and a.created_at < now() - interval '2 hours'
+      and l.stage <> 'closed_lost'
+      and (l.no_followup_until is null or l.no_followup_until <= now())
+      -- A pause means "a person is handling this". It stops meaning that once the person
+      -- has been silent for six hours; at that point the pause is just where the lead died.
+      and (
+        l.agent_paused = false
+        or not exists (
+          select 1 from fadc.messages h
+           where h.lead_id = l.id and h.sent_by = 'human'
+             and h.created_at > now() - interval '6 hours'
+        )
+      )
+    order by a.created_at asc
+    limit 20`;
+
+  const results: Array<Record<string, unknown>> = [];
+
+  for (const r of rows) {
+    try {
+      const needsDate = !r.scheduled_at;
+      const needsTech = !r.tech;
+      const who = r.first_name ?? "A customer";
+      const where = [r.town, r.zip].filter(Boolean).join(" ");
+
+      // ── The customer can only help with the date, and only if we can still reach them.
+      if (needsDate && r.window_open && r.messenger_id && /^[0-9]{8,}$/.test(r.messenger_id)) {
+        // Two asks, then it belongs to a human. A third message about the same missing date
+        // is how a booking turns into an opt-out.
+        if (r.date_chases >= 2) {
+          results.push({ appointment: r.id, name: r.first_name, skipped: "already asked twice" });
+        } else if (r.date_chased_at && Date.parse(r.date_chased_at) > Date.now() - 20 * 3600 * 1000) {
+          results.push({ appointment: r.id, name: r.first_name, skipped: "asked within 20h" });
+        } else if (!insideFollowupHours() && !dryRun) {
+          results.push({ appointment: r.id, name: r.first_name, skipped: "outside business hours" });
+        } else {
+          const msgs = (await sql`select text from fadc.messages
+                                   where lead_id = ${r.lead_id} and role = 'customer'
+                                   order by created_at`).map((m: any) => m.text);
+          const es = isSpanish(msgs.join("\n"));
+          const slotObj = await nextSlot(es, r.declined_slots ?? [], r.preferred_window ?? null);
+          const slot = slotObj?.phrase ?? null;
+          const svc = r.service ?? (es ? "el servicio" : "the service");
+
+          // Deliberately an offer, never "what day works for you". That open question is the
+          // one this codebase has lost leads to over and over; a yes/no is a smaller ask.
+          const msg = slot
+            ? (es
+              ? `¡Hola${r.first_name ? ` ${r.first_name}` : ""}! Tengo tu ${svc} apartado pero sin día confirmado. ¿Te queda ${slot}?`
+              : `Hi${r.first_name ? ` ${r.first_name}` : ""}! I have your ${svc} held but no day locked in yet. Does ${slot} work?`)
+            : (es
+              ? `¡Hola${r.first_name ? ` ${r.first_name}` : ""}! Tengo tu ${svc} apartado pero sin día confirmado. ¿Esta semana o la próxima?`
+              : `Hi${r.first_name ? ` ${r.first_name}` : ""}! I have your ${svc} held but no day locked in yet. This week or next?`);
+
+          if (dryRun) {
+            results.push({ appointment: r.id, name: r.first_name, would_send: msg });
+          } else {
+            await sql`insert into fadc.messages (lead_id, role, text, sent_by)
+                      values (${r.lead_id}, 'agent', ${msg}, 'date_chase')`;
+            await sendMessengerReply(r.messenger_id, msg);
+            await sql`update fadc.appointments
+                         set date_chased_at = now(), date_chases = date_chases + 1
+                       where id = ${r.id}`;
+            await sql`update fadc.leads set last_outbound_at = now() where id = ${r.lead_id}`;
+            results.push({ appointment: r.id, name: r.first_name, asked_for_date: true });
+          }
+        }
+      }
+
+      // ── Everything the customer cannot fix becomes ONE message to the team, never two.
+      // Missing date and missing tech almost always occur together (7 of the 9 found on
+      // 21 oct had both), so alerting per-problem would have doubled the noise on the very
+      // first run and taught Michel to ignore the channel.
+      const unreachable = needsDate && !r.window_open;
+      if ((unreachable || needsTech) && !r.dispatch_alerted_at) {
+        const missing: string[] = [];
+        if (needsDate) missing.push("no date");
+        if (needsTech) missing.push("no technician");
+        const days = Math.max(1, Math.round(r.silence_hours / 24));
+
+        const body =
+          `\u{1F527} ${who}${where ? ` (${where})` : ""} — ${r.service ?? "job"} booked with ${missing.join(" and ")}.\n` +
+          (unreachable
+            ? `Their Messenger window closed, silent ${days} day${days === 1 ? "" : "s"}, so this has to be a call.\n`
+            : needsDate
+            ? `Still reachable on Messenger; the bot is asking them for a day.\n`
+            : `Date is set${r.scheduled_at ? ` for ${String(r.scheduled_at).slice(0, 10)}` : ""} — it just needs a tech.\n`) +
+          (r.phone ? `${unreachable ? "Call them" : "Customer"}: ${r.phone}` : "No phone on file — check the thread.");
+
+        if (!dryRun) {
+          await notifyTeam(body, "appointment_stuck");
+          await sql`update fadc.appointments set dispatch_alerted_at = now() where id = ${r.id}`;
+        }
+        results.push({ appointment: r.id, name: r.first_name, alerted: missing.join("+"), would_send: dryRun ? body : undefined });
+      }
+    } catch (e) {
+      results.push({ appointment: r.id, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  return {
+    checked: rows.length,
+    asked: results.filter((x) => x.asked_for_date).length,
+    alerted: results.filter((x) => x.alerted).length,
+    results,
+  };
+}
+
 async function runFollowups(dryRun: boolean): Promise<Record<string, unknown>> {
   if (!dryRun && !insideFollowupHours()) {
     return { ok: true, sent: 0, reason: "outside business hours", boston: bostonNow() };
@@ -4094,9 +4239,12 @@ async function handle(req: Request): Promise<Response> {
       try { reviewFollowups = await runReviewFollowups(body.dry_run === true); } catch (e) { reviewFollowups = { error: e instanceof Error ? e.message : String(e) }; }
       let amountChase: Record<string, unknown> = {};
       try { amountChase = await runAmountChase(body.dry_run === true); } catch (e) { amountChase = { error: e instanceof Error ? e.message : String(e) }; }
+      // v87: the booking itself, once it exists, is the thing nothing was watching.
+      let staleAppts: Record<string, unknown> = {};
+      try { staleAppts = await runStaleAppointments(body.dry_run === true); } catch (e) { staleAppts = { error: e instanceof Error ? e.message : String(e) }; }
       const fu = await runFollowups(body.dry_run === true);
       await heartbeat("fadc_followups", true);
-      return json(200, { ...fu, resume, humanNudge, leaks, unanswered, ticketSweep, reviewFollowups, amountChase });
+      return json(200, { ...fu, resume, humanNudge, leaks, unanswered, ticketSweep, reviewFollowups, amountChase, staleAppts });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       await heartbeat("fadc_followups", false, msg);
