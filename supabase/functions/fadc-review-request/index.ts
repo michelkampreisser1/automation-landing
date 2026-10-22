@@ -55,9 +55,9 @@ serve(async (req) => {
 });
 
 function buildDefaultMessage(name: string): string {
-  return `Hi ${name}! 😊 Thank you so much for choosing First Air Duct Cleaning — we really appreciate your trust in our team.
+  return `Hi ${name}! 😊 Thank you so much for choosing us — we really appreciate your trust in our team.
 
-We just launched our Facebook page and we'd love your support! Would you mind leaving us a quick review? It takes about 30 seconds and really helps a small family business like ours grow.
+We're now operating as Vonkam Home Services, and we'd love your support. Would you mind leaving us a quick review? It takes about 30 seconds and really helps a small business like ours grow.
 
 Here's the link: ${REVIEWS_LINK}
 
