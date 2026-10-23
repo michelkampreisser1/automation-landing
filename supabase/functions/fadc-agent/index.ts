@@ -660,11 +660,19 @@ function callWhen(window: string | null): string {
   return "morning";
 }
 
+// The tech routes by ZIP before he reads the street. Add it when the address does not
+// already carry one (David, Hollis 03049, went out as "31 Shipley Drive, Hollis").
+function withZip(addr: string, zip?: string | null): string {
+  const z = (zip ?? "").trim();
+  if (!addr || !/^\d{5}$/.test(z) || /\b\d{5}\b/.test(addr)) return addr;
+  return `${addr} ${z}`;
+}
+
 function buildTicket(f: {
   name: string | null; jobType: string | null; service: string | null;
   day: string | null; window: string | null; address: string | null;
   phone: string | null; context: string | null; callAfter?: string | null;
-  scale?: string | null;
+  scale?: string | null; zip?: string | null;
 }): string {
   // Short on purpose. Afek and the techs read these on a phone between jobs, so the ticket
   // leads with WHEN (what a dispatcher sorts by), then the four facts needed to show up, then
@@ -682,7 +690,7 @@ function buildTicket(f: {
     "",
     f.name ?? "NAME NOT GIVEN",
     f.phone ?? "NO PHONE",
-    real(tidyAddress(f.address)) || "NO ADDRESS",
+    withZip(real(tidyAddress(f.address)), f.zip) || "NO ADDRESS",
     (f.jobType && f.jobType.trim()) || serviceLabel(f.service),
   ];
   // The extras only appear when there is something to say.
@@ -2512,6 +2520,7 @@ async function processInbound(input: {
         day: (L.preferred_day ?? null) || (lead.preferred_day as string | null),
         window: (L.preferred_window ?? null) || (lead.preferred_window as string | null),
         address: (L.address ?? null) || (lead.address as string | null),
+        zip: (L.zip ?? null) || (lead.zip as string | null),
         phone: (L.phone ?? null) || (lead.phone as string | null),
         context: out.job_context ?? null,
         callAfter: callAfter ?? (lead.call_after as string | null),
@@ -3058,13 +3067,13 @@ async function runTicketSweep(dryRun: boolean): Promise<Record<string, unknown>>
     slot_date: string | null; slot_window: string | null; exact_window: string | null;
     notes: string | null; tech: string | null;
     first_name: string | null; last_name: string | null; phone: string | null;
-    lead_address: string | null; lead_service: string | null; call_after: string | null;
+    lead_address: string | null; lead_zip: string | null; lead_service: string | null; call_after: string | null;
     job_scale: string | null;
   }[]>`
     select a.id, a.lead_id, a.service, a.address, a.slot_date::text as slot_date, a.slot_window,
            a.exact_window, a.notes, a.tech,
            l.first_name, l.last_name, l.phone,
-           l.address as lead_address, l.service as lead_service, l.call_after, l.job_scale
+           l.address as lead_address, l.zip as lead_zip, l.service as lead_service, l.call_after, l.job_scale
     from fadc.appointments a
     join fadc.leads l on l.id = a.lead_id
     where a.status in ('confirmed', 'pending')
@@ -3086,6 +3095,7 @@ async function runTicketSweep(dryRun: boolean): Promise<Record<string, unknown>>
       day: r.slot_date ? `${Number(r.slot_date.slice(5, 7))}/${Number(r.slot_date.slice(8, 10))}` : null,
       window: r.exact_window ?? r.slot_window,
       address: r.address ?? r.lead_address,
+      zip: r.lead_zip ?? null,
       phone: r.phone,
       context: null,
       callAfter: r.call_after,
@@ -3661,7 +3671,7 @@ async function handleCrm(auth: string | null, b: Record<string, any>): Promise<{
 
   if (b.action === "ticket") {
     const [a] = await sql`
-      select a.*, l.first_name, l.last_name, l.phone, l.address as lead_address, l.service as lead_service, l.call_after, l.job_scale
+      select a.*, l.first_name, l.last_name, l.phone, l.address as lead_address, l.zip as lead_zip, l.service as lead_service, l.call_after, l.job_scale
       from fadc.appointments a join fadc.leads l on l.id = a.lead_id where a.id = ${String(b.appointment_id ?? "")}::uuid`;
     if (!a) return { status: 404, body: { error: "no ticket" } };
     setCtxLead(a.lead_id);
@@ -3669,7 +3679,7 @@ async function handleCrm(auth: string | null, b: Record<string, any>): Promise<{
     const oldContext = String(a.notes ?? "").split("\n\n").slice(2).join("\n\n").trim() || null;
     const ticket = buildTicket({
       name, jobType: null, service: a.service ?? a.lead_service, day: isoToMd(a.slot_date),
-      window: a.exact_window ?? a.slot_window, address: a.address ?? a.lead_address, phone: a.phone,
+      window: a.exact_window ?? a.slot_window, address: a.address ?? a.lead_address, phone: a.phone, zip: a.lead_zip ?? null,
       context: oldContext, callAfter: null, scale: a.job_scale ?? null,
     });
     await sql`update fadc.appointments set notes = ${ticket}, updated_at = now() where id = ${a.id}`;
