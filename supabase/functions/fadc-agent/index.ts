@@ -3222,12 +3222,12 @@ async function runStaleAppointments(dryRun: boolean): Promise<Record<string, unk
   const rows = await sql<{
     id: string; lead_id: string; messenger_id: string | null; first_name: string | null;
     phone: string | null; town: string | null; zip: string | null; service: string | null;
-    scheduled_at: string | null; tech: string | null; status: string;
+    scheduled_at: string | null; slot_date: string | null; tech: string | null; status: string;
     date_chases: number; date_chased_at: string | null; dispatch_alerted_at: string | null;
     declined_slots: string[] | null; preferred_window: string | null;
     window_open: boolean; silence_hours: number;
   }[]>`
-    select a.id, a.scheduled_at, a.tech, a.status, a.date_chases, a.date_chased_at,
+    select a.id, a.scheduled_at, a.slot_date, a.tech, a.status, a.date_chases, a.date_chased_at,
            a.dispatch_alerted_at,
            l.id as lead_id, l.messenger_id, l.first_name, l.phone, l.town, l.zip, l.service,
            l.declined_slots, l.preferred_window,
@@ -3236,7 +3236,9 @@ async function runStaleAppointments(dryRun: boolean): Promise<Record<string, unk
     from fadc.appointments a
     join fadc.leads l on l.id = a.lead_id
     where a.status in ('pending', 'rescheduled')
-      and (a.scheduled_at is null or a.tech is null)
+      -- A real date can live in either column: the normal booking flow only ever writes
+      -- slot_date, so scheduled_at being null does NOT mean the date is unconfirmed.
+      and ((a.scheduled_at is null and a.slot_date is null) or a.tech is null)
       -- A booking still being written by the live chat is not stale. Two hours is long
       -- enough that the conversation has ended one way or the other.
       and a.created_at < now() - interval '2 hours'
@@ -3259,7 +3261,7 @@ async function runStaleAppointments(dryRun: boolean): Promise<Record<string, unk
 
   for (const r of rows) {
     try {
-      const needsDate = !r.scheduled_at;
+      const needsDate = !r.scheduled_at && !r.slot_date;
       const needsTech = !r.tech;
       const who = r.first_name ?? "A customer";
       const where = [r.town, r.zip].filter(Boolean).join(" ");
@@ -3325,7 +3327,7 @@ async function runStaleAppointments(dryRun: boolean): Promise<Record<string, unk
             ? `Their Messenger window closed, silent ${days} day${days === 1 ? "" : "s"}, so this has to be a call.\n`
             : needsDate
             ? `Still reachable on Messenger; the bot is asking them for a day.\n`
-            : `Date is set${r.scheduled_at ? ` for ${String(r.scheduled_at).slice(0, 10)}` : ""} — it just needs a tech.\n`) +
+            : `Date is set${(r.scheduled_at ?? r.slot_date) ? ` for ${String(r.scheduled_at ?? r.slot_date).slice(0, 10)}` : ""} — it just needs a tech.\n`) +
           (r.phone ? `${unreachable ? "Call them" : "Customer"}: ${r.phone}` : "No phone on file — check the thread.");
 
         if (!dryRun) {
