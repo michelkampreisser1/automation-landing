@@ -3438,14 +3438,27 @@ async function runTechnicianOutreach(dryRun: boolean): Promise<Record<string, un
       and contacted_at is null
       and opted_out = false
       and phone is not null
-    order by created_at asc
+      and coalesce(zone, '') <> 'nj'
+      -- 8xx = central de franquicia: no recibe SMS y no es el técnico
+      and right(regexp_replace(phone, '\\D', '', 'g'), 10) !~ '^8(00|33|44|55|66|77|88)'
+    -- Zonas hueco primero (donde Afek e Ilay no llegan: sur de NH, Merrimack
+    -- Valley, North Shore, SE MA/Cape, Springfield — zone 'other'), sur de NH
+    -- al frente; luego Worcester/Providence, y al final Hartford/Boston.
+    order by case
+               when zone = 'other' and base_town ~* '\\mNH\\M' then 0
+               when zone = 'other' then 1
+               when zone in ('worcester','providence') then 2
+               when zone = 'hartford' then 3
+               else 4
+             end,
+             created_at desc
     limit ${TECH_OUTREACH_DAILY_CAP}
   `;
 
   const results: Array<Record<string, unknown>> = [];
   for (const r of rows) {
     const town = r.base_town ? ` in the ${r.base_town} area` : "";
-    const msg = `Hi, this is Michel with Vonkam Home Services (air duct/dryer vent, MA). `
+    const msg = `Hi, this is Michel with Vonkam Home Services (air duct/dryer vent, MA/NH/CT/RI). `
       + `We have duct & vent jobs already sold and scheduled${town} and need a sub to run them `
       + `-- customer pays you on site, same day, you keep 60%. Interested? Reply YES and I'll call you. `
       + `Reply STOP to opt out.`;
