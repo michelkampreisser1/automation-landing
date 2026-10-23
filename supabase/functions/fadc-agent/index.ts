@@ -3120,6 +3120,60 @@ async function runTicketSweep(dryRun: boolean): Promise<Record<string, unknown>>
   return { ok: true, sent: results.filter((x: any) => x.sent).length, results };
 }
 
+// A booking moved by hand (SQL, the CRM, a person in the Meta inbox) never reached Telegram:
+// Sonia was moved from Thu 10/22 to Mon 10/26 and the team only had the old ticket. This
+// sweep rebuilds the ticket for every upcoming appointment and compares its first line
+// (the "IVY JOB — <day>, <window>" header) with the last ticket the team received for that
+// lead. If the header changed, the new ticket goes out as TICKET CHANGED. No schema change:
+// the last notification is the record of what the team already knows.
+async function runTicketChangeSweep(dryRun: boolean): Promise<Record<string, unknown>> {
+  const rows = await sql<{
+    id: string; lead_id: string; service: string | null; address: string | null;
+    slot_date: string | null; slot_window: string | null; exact_window: string | null;
+    status: string; tech: string | null;
+    first_name: string | null; last_name: string | null; phone: string | null;
+    lead_address: string | null; lead_zip: string | null; lead_service: string | null;
+    call_after: string | null; job_scale: string | null; last_text: string | null;
+  }[]>`
+    select a.id, a.lead_id, a.service, a.address, a.slot_date::text as slot_date, a.slot_window,
+           a.exact_window, a.status, a.tech,
+           l.first_name, l.last_name, l.phone,
+           l.address as lead_address, l.zip as lead_zip, l.service as lead_service, l.call_after, l.job_scale,
+           (select n.text from fadc.notifications n
+             where n.lead_id = a.lead_id and n.kind in ('appointment', 'ticket_update')
+             order by n.created_at desc limit 1) as last_text
+    from fadc.appointments a
+    join fadc.leads l on l.id = a.lead_id
+    where a.status in ('confirmed', 'pending', 'rescheduled')
+      and a.slot_date > current_date
+  `;
+  const results: Record<string, unknown>[] = [];
+  for (const r of rows) {
+    // No ticket ever sent: that is the orphan sweep's job, not this one.
+    if (!r.last_text) continue;
+    const name = [r.first_name, r.last_name].filter(Boolean).join(" ") || null;
+    const ticket = buildTicket({
+      name, jobType: null, service: r.service ?? r.lead_service,
+      day: r.slot_date ? `${Number(r.slot_date.slice(5, 7))}/${Number(r.slot_date.slice(8, 10))}` : null,
+      window: r.exact_window ?? r.slot_window,
+      address: r.address ?? r.lead_address, zip: r.lead_zip ?? null, phone: r.phone,
+      context: null, callAfter: r.call_after, scale: r.job_scale,
+    });
+    const header = ticket.split("\n")[0];
+    if (r.last_text.includes(header)) continue;
+    if (dryRun) { results.push({ lead_id: r.lead_id, name, would_send: header }); continue; }
+    await sql`update fadc.appointments set notes = ${ticket}, updated_at = now() where id = ${r.id}`;
+    await notifyTeamFor(r.lead_id,
+      "✏️ TICKET CHANGED (new date or time)\n\n" + ticket + "\n\n" +
+      (r.tech ? `Tech: ${r.tech}` : "⚠️ Tech: NOT ASSIGNED") + "\n" +
+      `Status: ${r.status}\n(Auto-detected: the booking changed after the last ticket went out)`,
+      "ticket_update",
+    );
+    results.push({ lead_id: r.lead_id, name, sent: header });
+  }
+  return { ok: true, sent: results.filter((x: any) => x.sent).length, results };
+}
+
 const REVIEWS_LINK = "https://www.facebook.com/profile.php?id=61593572532326&sk=reviews";
 // Someone who had a bad time gets a person, never a review link.
 // Someone asking us to stop is the one message we must never answer with another pitch.
@@ -4354,6 +4408,8 @@ async function handle(req: Request): Promise<Response> {
       try { unanswered = await runUnansweredAlert(body.dry_run === true); } catch (e) { unanswered = { error: e instanceof Error ? e.message : String(e) }; }
       let ticketSweep: Record<string, unknown> = {};
       try { ticketSweep = await runTicketSweep(body.dry_run === true); } catch (e) { ticketSweep = { error: e instanceof Error ? e.message : String(e) }; }
+      let ticketChanges: Record<string, unknown> = {};
+      try { ticketChanges = await runTicketChangeSweep(body.dry_run === true); } catch (e) { ticketChanges = { error: e instanceof Error ? e.message : String(e) }; }
       let reviewFollowups: Record<string, unknown> = {};
       try { reviewFollowups = await runReviewFollowups(body.dry_run === true); } catch (e) { reviewFollowups = { error: e instanceof Error ? e.message : String(e) }; }
       let amountChase: Record<string, unknown> = {};
@@ -4363,7 +4419,7 @@ async function handle(req: Request): Promise<Response> {
       try { staleAppts = await runStaleAppointments(body.dry_run === true); } catch (e) { staleAppts = { error: e instanceof Error ? e.message : String(e) }; }
       const fu = await runFollowups(body.dry_run === true);
       await heartbeat("fadc_followups", true);
-      return json(200, { ...fu, resume, humanNudge, leaks, unanswered, ticketSweep, reviewFollowups, amountChase, staleAppts });
+      return json(200, { ...fu, resume, humanNudge, leaks, unanswered, ticketSweep, ticketChanges, reviewFollowups, amountChase, staleAppts });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       await heartbeat("fadc_followups", false, msg);
