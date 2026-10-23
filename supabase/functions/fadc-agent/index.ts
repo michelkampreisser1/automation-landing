@@ -2804,6 +2804,24 @@ async function runResume(dryRun: boolean): Promise<Record<string, unknown>> {
         results.push({ id: r.id, skipped: "no safe reply" });
         continue;
       }
+      // 23 oct (Jill): the resume path told a customer "You're all set, Thursday 10-12" off
+      // a slot she had CANCELLED a week earlier, and no ticket existed. Resume never books:
+      // a confirmation without a live appointment goes to a person instead.
+      const [{ live }] = await sql<{ live: number }[]>`
+        select count(*)::int as live from fadc.appointments
+        where lead_id = ${r.id} and status in ('pending','confirmed','rescheduled') and slot_date >= current_date`;
+      if (live === 0 && (/\b(all set|you're booked|you are booked|booked you|locked in|see you (on )?(mon|tue|wed|thu|fri|sat|sun))/i.test(reply)
+          || out.lead?.stage === "ready_to_confirm")) {
+        if (!dryRun) {
+          await notifyTeamFor(r.id,
+            `\u{1F4C5} ${r.first_name ?? "A lead"} wants to book again but has no live appointment. A person must confirm the day.\n` +
+            `They wrote: "${t.slice(0, 140)}"\nBot would have said: "${reply.slice(0, 160)}"`, "resume_needs_booking");
+          // needs_human takes it out of the resume query, so the alert fires once.
+          await sql`update fadc.leads set needs_human = true where id = ${r.id}`;
+        }
+        results.push({ id: r.id, skipped: "would confirm without a live appointment" });
+        continue;
+      }
       reply = reply.replace(/\s+[\u2013\u2014]\s+/g, ", ");
       if (dryRun) { results.push({ id: r.id, would_send: reply }); continue; }
       await sendMessengerReply(r.messenger_id, reply);
