@@ -3449,6 +3449,12 @@ async function runTechnicianOutreach(dryRun: boolean): Promise<Record<string, un
   if (!dryRun && !insideOutreachHours()) {
     return { ok: true, sent: 0, reason: "outside outreach hours", boston: bostonNow() };
   }
+  // Daily cap lives in fadc.settings so it can be ramped (20 → 30 …) without a redeploy.
+  // Env var stays as the fallback; hard ceiling of 60 so a typo can't blast the list.
+  const [capRow] = await sql<{ value: string }[]>`
+    select value from fadc.settings where key = 'tech_outreach_daily_cap'`;
+  const capSetting = Number(capRow?.value);
+  const dailyCap = Math.min(60, Number.isFinite(capSetting) && capSetting > 0 ? capSetting : TECH_OUTREACH_DAILY_CAP);
   const rows = await sql<{ id: string; name: string; base_town: string | null; phone: string | null }[]>`
     select id, name, base_town, phone
     from fadc.technicians
@@ -3470,7 +3476,7 @@ async function runTechnicianOutreach(dryRun: boolean): Promise<Record<string, un
                else 4
              end,
              created_at desc
-    limit ${TECH_OUTREACH_DAILY_CAP}
+    limit ${dailyCap}
   `;
 
   const results: Array<Record<string, unknown>> = [];
@@ -3479,7 +3485,7 @@ async function runTechnicianOutreach(dryRun: boolean): Promise<Record<string, un
     const msg = `Hi, this is Michel with Vonkam Home Services (air duct/dryer vent, MA/NH/CT/RI). `
       + `We have duct & vent jobs already sold and scheduled${town} and need a sub to run them `
       + `-- customer pays you on site, same day, you keep 60%. Interested? Reply YES and I'll call you. `
-      + `Reply STOP to opt out.`;
+      + `Not interested? Reply STOP and we won't text you again.`;
     if (dryRun) {
       results.push({ id: r.id, name: r.name, phone: r.phone, would_send: msg });
       continue;
