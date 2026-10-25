@@ -1325,8 +1325,9 @@ async function callClaude(history: { role: string; text: string }[], stateNote?:
 // it is configured. Without this, any alert raised while TELEGRAM_* secrets are unset
 // disappears silently — which is how the team ends up blind to what the bot flagged.
 // Read them with:  select * from fadc.notifications where not seen order by created_at desc;
-async function notifyTeam(text: string, kind = "info") {
+async function notifyTeam(text: string, kind = "info"): Promise<number | null> {
   let delivered = false;
+  let msgId: number | null = null;
   if (TG_TOKEN && TG_CHAT) {
     try {
       const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
@@ -1335,6 +1336,8 @@ async function notifyTeam(text: string, kind = "info") {
         body: JSON.stringify({ chat_id: TG_CHAT, text }),
       });
       delivered = res.ok;
+      const j = await res.json().catch(() => null);
+      if (typeof j?.result?.message_id === "number") msgId = j.result.message_id;
     } catch (_) { /* fall through to the DB record */ }
   }
   try {
@@ -1342,14 +1345,16 @@ async function notifyTeam(text: string, kind = "info") {
     await sql`insert into fadc.notifications (kind, text, delivered_telegram, lead_id)
               values (${kind}, ${text}, ${delivered}, ${lid}::uuid)`;
   } catch (_) { /* never block the reply on a notification */ }
+  return msgId;
 }
 
 // Same as notifyTeam, but for alerts raised OUTSIDE a request (cron sweeps), where the
 // AsyncLocalStorage lead context is empty. The lead id has to be explicit, otherwise the
 // notification lands with lead_id null and the "have I already alerted on this lead?"
 // dedup check in runLeakAlert can never match.
-async function notifyTeamFor(leadId: string, text: string, kind: string) {
+async function notifyTeamFor(leadId: string, text: string, kind: string): Promise<number | null> {
   let delivered = false;
+  let msgId: number | null = null;
   if (TG_TOKEN && TG_CHAT) {
     try {
       const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
@@ -1358,12 +1363,15 @@ async function notifyTeamFor(leadId: string, text: string, kind: string) {
         body: JSON.stringify({ chat_id: TG_CHAT, text }),
       });
       delivered = res.ok;
+      const j = await res.json().catch(() => null);
+      if (typeof j?.result?.message_id === "number") msgId = j.result.message_id;
     } catch (_) { /* fall through to the DB record */ }
   }
   try {
     await sql`insert into fadc.notifications (kind, text, delivered_telegram, lead_id)
               values (${kind}, ${text}, ${delivered}, ${leadId}::uuid)`;
   } catch (_) { /* never block the sweep on a notification */ }
+  return msgId;
 }
 
 // Send a text message back to the customer through the Messenger Send API.
@@ -2569,16 +2577,24 @@ async function processInbound(input: {
                     ${slotWin && ticketWin && ticketWin !== slotWin ? ticketWin : null})`;
         }
       } catch (_) { /* never block the reply on ticket creation */ }
-      await notifyTeam(
+      const ticketMsgId = await notifyTeam(
         ticket + "\n\n" +
         (overbooked > 0
           ? `\u{1F6A8} DOUBLE BOOKING: ${overbooked} other job(s) already hold ${slotDate} ${slotWin}. Send a second crew or reschedule ONE of them today.\n`
           : "") +
         (ticketAction === "updated"
           ? "\u26A0\uFE0F This is the SAME job as before, not a new one. The ticket was updated in place.\nThe customer has been CONFIRMED for this slot. Assign a tech, or reschedule them if nobody is free."
-          : "The customer has been CONFIRMED for this slot. Assign a tech, or reschedule them if nobody is free."),
+          : "The customer has been CONFIRMED for this slot. Assign a tech, or reschedule them if nobody is free.") +
+        "\n\nTo assign: reply to THIS message with the tech's name.",
         "appointment",
       );
+      // Guarda el id del mensaje para que una respuesta en Telegram asigne el tecnico.
+      if (ticketMsgId) {
+        try {
+          await sql`update fadc.appointments set ticket_msg_id = ${ticketMsgId}
+                     where lead_id = ${leadId} and status in ('pending','confirmed','rescheduled')`;
+        } catch (_) { /* nunca bloquear la respuesta al cliente */ }
+      }
 
       // \u2500\u2500 Coverage check at ticket-ready \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
       // Only fires when a full ticket exists (stage just became ready_to_confirm).
@@ -3134,13 +3150,19 @@ async function runTicketSweep(dryRun: boolean): Promise<Record<string, unknown>>
     // Update the appointment notes with the generated ticket
     await sql`update fadc.appointments set notes = ${ticket}, updated_at = now() where id = ${r.id}`;
     // Send ticket to Telegram
-    await notifyTeamFor(r.lead_id,
+    const sweepMsgId = await notifyTeamFor(r.lead_id,
       ticket + "\n\n" +
       (r.tech ? `Tech: ${r.tech}` : "⚠️ Tech: NOT ASSIGNED") + "\n" +
       "The customer has been CONFIRMED for this slot. Assign a tech, or reschedule them if nobody is free.\n" +
+      "To assign: reply to THIS message with the tech's name.\n" +
       "(Auto-detected: human-booked appointment without ticket)",
       "appointment",
     );
+    if (sweepMsgId) {
+      try {
+        await sql`update fadc.appointments set ticket_msg_id = ${sweepMsgId} where id = ${r.id}`;
+      } catch (_) { /* el barrido nunca falla por esto */ }
+    }
     results.push({ lead_id: r.lead_id, name, sent: true });
   }
   return { ok: true, sent: results.filter((x: any) => x.sent).length, results };
@@ -3189,12 +3211,18 @@ async function runTicketChangeSweep(dryRun: boolean): Promise<Record<string, unk
     if (r.last_text.includes(header)) continue;
     if (dryRun) { results.push({ lead_id: r.lead_id, name, would_send: header }); continue; }
     await sql`update fadc.appointments set notes = ${ticket}, updated_at = now() where id = ${r.id}`;
-    await notifyTeamFor(r.lead_id,
+    const changeMsgId = await notifyTeamFor(r.lead_id,
       "✏️ TICKET CHANGED (new date or time)\n\n" + ticket + "\n\n" +
       (r.tech ? `Tech: ${r.tech}` : "⚠️ Tech: NOT ASSIGNED") + "\n" +
+      (r.tech ? "" : "To assign: reply to THIS message with the tech's name.\n") +
       `Status: ${r.status}\n(Auto-detected: the booking changed after the last ticket went out)`,
       "ticket_update",
     );
+    if (changeMsgId) {
+      try {
+        await sql`update fadc.appointments set ticket_msg_id = ${changeMsgId} where id = ${r.id}`;
+      } catch (_) { /* el barrido nunca falla por esto */ }
+    }
     results.push({ lead_id: r.lead_id, name, sent: header });
   }
   return { ok: true, sent: results.filter((x: any) => x.sent).length, results };
@@ -3797,7 +3825,15 @@ async function handleCrm(auth: string | null, b: Record<string, any>): Promise<{
       : status === "completed" ? "✅ JOB DONE"
       : "✏️ TICKET CHANGED";
     const extra = [a.tech ? `Tech: ${a.tech}` : "Tech: NOT ASSIGNED", `Status: ${status}`, b.note ? String(b.note) : ""].filter(Boolean).join("\n");
-    await notifyTeam(`${head} (by ${me.name})\n\n${ticket}\n\n${extra}`, "ticket_update");
+    const crmMsgId = await notifyTeam(
+      `${head} (by ${me.name})\n\n${ticket}\n\n${extra}` +
+      (a.tech ? "" : "\nTo assign: reply to THIS message with the tech's name."),
+      "ticket_update");
+    if (crmMsgId) {
+      try {
+        await sql`update fadc.appointments set ticket_msg_id = ${crmMsgId} where id = ${a.id}`;
+      } catch (_) { /* no bloquear la respuesta del CRM */ }
+    }
     return { status: 200, body: { ok: true, ticket } };
   }
 
@@ -4114,6 +4150,7 @@ async function handleTelegramUpdate(u: Record<string, any>): Promise<Record<stri
     const chatId = String(msg.chat?.id ?? "");
     if (TG_CHAT && chatId !== String(TG_CHAT)) return { ignored: "wrong chat" };
     const repliedTo = Number(msg.reply_to_message.message_id);
+    const who = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(" ") || "someone";
 
     // Responder al aviso "Technician reply" le manda un SMS a ese tecnico desde el 617.
     // 25 oct: antes el aviso era un callejon sin salida. Llegaba "me interesa" por SMS,
@@ -4149,10 +4186,49 @@ async function handleTelegramUpdate(u: Record<string, any>): Promise<Record<stri
       return { ok: send.ok, sent_to: techRow.name, error: send.error };
     }
 
+    // Responder a un TICKET con un nombre asigna el tecnico de ese trabajo.
+    // 25 oct: `appointments.tech` estaba vacio en 16 de 20 citas, no porque nadie fuera
+    // sino porque no habia por donde registrarlo: el ticket llegaba a Telegram y la
+    // asignacion se quedaba en la cabeza de Michel o en un WhatsApp aparte. Resultado:
+    // las alertas gritaban "sin tecnico" aunque si hubiera ido alguien, y no se podia
+    // medir nada por tecnico. Ahora el ticket trae su propio message_id y responderlo
+    // escribe el nombre en la columna. ("IVY JOB" del encabezado es la marca del ticket,
+    // no un tecnico — nunca lo fue.)
+    const [apptForTech] = await sql<{ id: string; lead_id: string; tech: string | null; slot_date: string | null }[]>`
+      select id, lead_id, tech, slot_date::text as slot_date from fadc.appointments
+      where ticket_msg_id = ${repliedTo} limit 1`;
+    if (apptForTech) {
+      const name = String(msg.text).trim().slice(0, 80);
+      if (!name) return { ignored: "empty tech name" };
+      // Un numero suelto casi siempre es el monto cobrado mandado al mensaje equivocado.
+      if (/^[\d.,$ ]+$/.test(name)) {
+        await tgApi("sendMessage", {
+          chat_id: chatId, reply_to_message_id: msg.message_id,
+          text: "Ese mensaje es el ticket. Para guardar el monto, responde a la pregunta de cuanto cobraste. Para asignar tecnico, responde aqui con su nombre.",
+        });
+        return { ignored: "number replied to a ticket" };
+      }
+      setCtxLead(apptForTech.lead_id);
+      const before = apptForTech.tech;
+      await sql`update fadc.appointments set tech = ${name}, updated_at = now() where id = ${apptForTech.id}`;
+      try {
+        await sql`insert into fadc.crm_log (actor, action, lead_id, appointment_id, detail)
+                  values (${who}, 'assign_tech', ${apptForTech.lead_id}, ${apptForTech.id},
+                          ${JSON.stringify({ tech: name, previous: before })}::jsonb)`;
+      } catch (_) { /* el registro no bloquea la asignacion */ }
+      await tgApi("sendMessage", {
+        chat_id: chatId, reply_to_message_id: msg.message_id,
+        text: before && before !== name
+          ? `\u{1F527} ${apptForTech.slot_date ?? "ese trabajo"}: ${before} \u2192 ${name}.`
+          : `\u{1F527} Asignado a ${name}.`,
+      });
+      return { ok: true, assigned: name, appointment_id: apptForTech.id };
+    }
+
     const [a] = await sql`
       select id, lead_id, address from fadc.appointments
       where amount_prompt_msg_id = ${repliedTo}`;
-    if (!a) return { ignored: "not a reply to an amount prompt or a technician" };
+    if (!a) return { ignored: "not a reply to a ticket, an amount prompt or a technician" };
     setCtxLead(a.lead_id);
     const num = Number(String(msg.text).replace(/[^0-9.]/g, ""));
     if (!isFinite(num) || num <= 0 || num > 20000) {
@@ -4162,7 +4238,6 @@ async function handleTelegramUpdate(u: Record<string, any>): Promise<Record<stri
       });
       return { ignored: "bad amount" };
     }
-    const who = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(" ") || "someone";
     await sql`update fadc.appointments set ticket_amount = ${num}, amount_prompt_msg_id = null, updated_at = now() where id = ${a.id}`;
     await sql`
       insert into fadc.crm_log (actor, action, lead_id, appointment_id, detail)
