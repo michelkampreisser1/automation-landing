@@ -32,7 +32,18 @@ const JOBS: Record<string, number> = {
   // no-op some days once contacted_at is null for nobody left (cap reached, or list empty).
   // Same daily-job threshold as closeout: only alert once a whole day+buffer has passed.
   fadc_technician_outreach: 1500,
+  // 25 oct: ESTE FALTABA. El buscador de tecnicos se agrego el 22 oct y nadie lo metio al
+  // vigilante. El 24 oct se quedo sin saldo de Apify (error 402) y estuvo caido mas de 17
+  // horas sin que sonara una sola alarma — el agente que llena la cola entera, mudo. Corre
+  // cada 2 h, asi que 6 h de tolerancia cubre dos corridas perdidas antes de avisar.
+  fadc_tech_sourcing: 360,
 };
+
+// Un error reciente no siempre llega a vencer el umbral de antiguedad: un job que corre cada
+// dos horas puede estar fallando desde hace una hora y seguir "fresco". Pero un `last_error`
+// con un intento posterior al ultimo exito significa que la corrida mas reciente trono, y eso
+// se avisa de inmediato. Asi el 402 de Apify se habria visto a la primera, no al dia siguiente.
+const ERROR_GRACE_MINUTES = 15;
 
 const REALERT_MINUTES = 60;
 
@@ -120,6 +131,19 @@ Deno.serve(async (req: Request) => {
           job,
           reason: `last_ok ${Math.round(ageMin)} min ago (max ${maxMinutes})${hb.last_error ? ` — last error: ${hb.last_error}` : ""}`,
         });
+        continue;
+      }
+      // La corrida mas reciente fallo, aunque el ultimo exito siga dentro del umbral.
+      if (hb.last_error && hb.last_attempt_at) {
+        const attempt = new Date(hb.last_attempt_at).getTime();
+        const ok = new Date(hb.last_ok_at).getTime();
+        const sinceAttempt = (now - attempt) / 60_000;
+        if (attempt > ok && sinceAttempt > ERROR_GRACE_MINUTES) {
+          stale.push({
+            job,
+            reason: `la ultima corrida fallo hace ${Math.round(sinceAttempt)} min: ${hb.last_error}`,
+          });
+        }
       }
     }
 
