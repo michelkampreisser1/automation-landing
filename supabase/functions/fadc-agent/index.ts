@@ -1325,10 +1325,45 @@ async function callClaude(history: { role: string; text: string }[], stateNote?:
 // it is configured. Without this, any alert raised while TELEGRAM_* secrets are unset
 // disappears silently — which is how the team ends up blind to what the bot flagged.
 // Read them with:  select * from fadc.notifications where not seen order by created_at desc;
+// ── Qué interrumpe a Michel y qué no ────────────────────────────────────────
+// 25 oct. El ticket de Mary Lou salió el 19 a las 10:03 AM, Telegram confirmó la
+// entrega, y aun así nadie lo trabajó: fue 1 de 22 mensajes ese día, y en los 17
+// minutos siguientes llegaron otros tres avisos de la MISMA clienta. En 14 días
+// salieron ~340 avisos de 39 tipos distintos, unos 30 al día, de los cuales menos
+// de uno al día era un ticket. Cuando todo es alerta, nada es alerta.
+//
+// Esto es una lista de SILENCIO, no una de permiso: lo que no esté aquí sigue
+// sonando. Así, un aviso nuevo que alguien agregue mañana no nace mudo por
+// descuido — el error caro es callar algo urgente, no dejar pasar uno de más.
+//
+// Nada se pierde: la fila se sigue guardando en fadc.notifications con
+// delivered_telegram = false, y el tablero la muestra. Sólo deja de empujarse.
+const TG_SILENCIO = new Set([
+  "human_takeover",   // 4.9/día — le avisa a Michel lo que Michel acaba de hacer
+  "followup",         // 4.4/día — "mandé 6 seguimientos", reporte de rutina
+  "paused_reply",     // 3.4/día — lo cubre unanswered15, que sí escala
+  "attachment",       // 1.6/día — "X mandó una imagen"
+  "appointment_stuck",// el tablero ya tiene "Citas próximas sin técnico" en rojo
+  "coverage_none",    // igual: duplica lo que el propio ticket ya dice
+  "coverage_sub",
+  "area",             // ZIP fuera de zona; el agente sigue recolectando igual
+  "human_nudge",
+  "comment_handled",
+  "hesitation",
+  "resumed",
+  "tech_sourcing",    // el tablero muestra la cola de técnicos
+  "tech_outreach",    // reporte diario del envío de SMS
+  "too_soon",
+  "declined_slots",
+  "review_sent",
+  "review_window_closed",
+  "opt_out",          // el bot ya se apagó solo para esa persona
+]);
+
 async function notifyTeam(text: string, kind = "info"): Promise<number | null> {
   let delivered = false;
   let msgId: number | null = null;
-  if (TG_TOKEN && TG_CHAT) {
+  if (TG_TOKEN && TG_CHAT && !TG_SILENCIO.has(kind)) {
     try {
       const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
         method: "POST",
@@ -1355,7 +1390,7 @@ async function notifyTeam(text: string, kind = "info"): Promise<number | null> {
 async function notifyTeamFor(leadId: string, text: string, kind: string): Promise<number | null> {
   let delivered = false;
   let msgId: number | null = null;
-  if (TG_TOKEN && TG_CHAT) {
+  if (TG_TOKEN && TG_CHAT && !TG_SILENCIO.has(kind)) {
     try {
       const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
         method: "POST",
