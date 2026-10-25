@@ -1,5 +1,7 @@
 // fadc-tech-sourcing — el agente que llena la cola de técnicos solo.
-// build: v4 (23 Oct 2026) — apunta a las zonas HUECO: donde Afek e Ilay no
+// build: v5 (24 Oct 2026) — descarta las fichas SEO de revendedores de leads antes de que
+// entren a la cola (ver looksLikeLeadReseller más abajo).
+// v4 (23 Oct 2026) — apunta a las zonas HUECO: donde Afek e Ilay no
 // llegan (sur de NH, Merrimack Valley, North Shore, sureste MA/Cape, Worcester,
 // Springfield, CT fuera de Hartford). Esas búsquedas van con zone='other' y se
 // corren primero. NJ ya no se atiende: fuera de SERVED_STATES. La cola que
@@ -92,6 +94,19 @@ function last10(phone: unknown): string | null {
 // Los 8xx son centrales de franquicias: no reciben SMS y no son el técnico.
 function isTollFree(p10: string): boolean {
   return /^8(00|33|44|55|66|77|88)/.test(p10);
+}
+
+// Fichas SEO de revendedores de leads disfrazadas de negocio local. Verificado a mano el
+// 24 oct contra 216 prospectos: 49 coincidieron y las 49 eran basura — ningún negocio real
+// quedó atrapado. Dos redes:
+//   1. el nombre termina en "<Pueblo>, <ST>" — "VSM Dryer Vent Cleaning Services Nashua, NH"
+//   2. una palabra inventada + "Air vent cleaning service" — Hovlor, Peakjax, Pipmax, TopCrew
+// Si estos contestan el SMS es para vendernos leads, no para correr un trabajo. Se filtran
+// aquí, en la fuente, para no volver a llenar la cola con ellos.
+const RESELLER_RE =
+  /,\s*(MA|NH|CT|RI)\.?\s*(\d{5})?\s*$|air vent cleaning servic|(media|marketing|seo)\b/i;
+function looksLikeLeadReseller(name: string): boolean {
+  return RESELLER_RE.test(name);
 }
 
 async function sendTelegram(text: string): Promise<boolean> {
@@ -288,11 +303,14 @@ Deno.serve(async (req: Request) => {
       );
 
       let skippedNoPhone = 0, skippedDupe = 0, skippedCat = 0, skippedZone = 0, skippedTollFree = 0;
+      let skippedReseller = 0;
       const batch = new Map<string, Row>();
 
       for (const it of items) {
         const cat = String(it.categoryName ?? "");
         if (!GOOD_CATS.has(cat)) { skippedCat++; continue; }
+
+        if (looksLikeLeadReseller(String(it.title ?? ""))) { skippedReseller++; continue; }
 
         const p10 = last10(it.phone);
         if (!p10) { skippedNoPhone++; continue; }
@@ -374,7 +392,7 @@ Deno.serve(async (req: Request) => {
       return json({
         ok: true, action: "collected", run_id: runId,
         raw: items.length, inserted: fresh.length,
-        skipped: { dupe: skippedDupe, no_phone: skippedNoPhone, category: skippedCat, zone: skippedZone, toll_free: skippedTollFree },
+        skipped: { dupe: skippedDupe, no_phone: skippedNoPhone, category: skippedCat, zone: skippedZone, toll_free: skippedTollFree, reseller: skippedReseller },
         gap_queue: queue,
       });
     }

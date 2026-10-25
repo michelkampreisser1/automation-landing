@@ -3477,7 +3477,8 @@ async function runTechnicianOutreach(dryRun: boolean): Promise<Record<string, un
       -- una palabra inventada delante. Si contestan es para vendernos leads, no para trabajar.
       and name !~ ',\\s*(MA|NH|CT|RI)\\.?\\s*(\\d{5})?\\s*$'
       and name !~* 'air vent cleaning servic'
-      and name !~* '\\y(media|marketing|seo)\\y'
+      -- "media" sin frontera por delante: la red mete nombres pegados como "ProREDMedia".
+      and name !~* '(media|marketing|seo)\\y'
       -- 8xx = central de franquicia: no recibe SMS y no es el técnico
       and right(regexp_replace(phone, '\\D', '', 'g'), 10) !~ '^8(00|33|44|55|66|77|88)'
     -- Zonas hueco primero (donde Afek e Ilay no llegan: sur de NH, Merrimack
