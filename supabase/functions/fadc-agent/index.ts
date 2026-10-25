@@ -4113,10 +4113,46 @@ async function handleTelegramUpdate(u: Record<string, any>): Promise<Record<stri
   if (msg?.reply_to_message?.message_id && typeof msg.text === "string") {
     const chatId = String(msg.chat?.id ?? "");
     if (TG_CHAT && chatId !== String(TG_CHAT)) return { ignored: "wrong chat" };
+    const repliedTo = Number(msg.reply_to_message.message_id);
+
+    // Responder al aviso "Technician reply" le manda un SMS a ese tecnico desde el 617.
+    // 25 oct: antes el aviso era un callejon sin salida. Llegaba "me interesa" por SMS,
+    // Telegram lo mostraba, y no habia por donde contestar salvo entrar a la consola de
+    // Twilio o llamar desde el celular propio. Negociar el reparto sigue siendo juicio de
+    // Michel: esto no contesta solo, solo le da por donde escribir.
+    const [techRow] = await sql<{ id: string; name: string; phone: string | null }[]>`
+      select id, name, phone from fadc.technicians
+      where tg_reply_msg_id = ${repliedTo} limit 1`;
+    if (techRow) {
+      const outText = String(msg.text).trim();
+      if (!outText) return { ignored: "empty technician reply" };
+      if (!techRow.phone) {
+        await tgApi("sendMessage", {
+          chat_id: chatId, reply_to_message_id: msg.message_id,
+          text: `No tengo telefono guardado para ${techRow.name}, no pude mandar el mensaje.`,
+        });
+        return { ignored: "technician has no phone" };
+      }
+      const send = await sendSMS(techRow.phone, outText);
+      await tgApi("sendMessage", {
+        chat_id: chatId, reply_to_message_id: msg.message_id,
+        text: send.ok
+          ? `\u{2709}\u{FE0F} Enviado a ${techRow.name} (${techRow.phone}).`
+          : `\u{26A0}\u{FE0F} No se pudo enviar a ${techRow.name}: ${send.error ?? "error desconocido"}`,
+      });
+      if (send.ok) {
+        await sql`update fadc.technicians
+                   set stage = case when stage in ('prospect','replied') then 'replied' else stage end,
+                       updated_at = now()
+                   where id = ${techRow.id}`;
+      }
+      return { ok: send.ok, sent_to: techRow.name, error: send.error };
+    }
+
     const [a] = await sql`
       select id, lead_id, address from fadc.appointments
-      where amount_prompt_msg_id = ${Number(msg.reply_to_message.message_id)}`;
-    if (!a) return { ignored: "not a reply to an amount prompt" };
+      where amount_prompt_msg_id = ${repliedTo}`;
+    if (!a) return { ignored: "not a reply to an amount prompt or a technician" };
     setCtxLead(a.lead_id);
     const num = Number(String(msg.text).replace(/[^0-9.]/g, ""));
     if (!isFinite(num) || num <= 0 || num > 20000) {

@@ -1,5 +1,7 @@
 // fadc-twilio-webhook — receives inbound SMS replies to Michel's 617 Twilio number.
-// build: v1 (21 Oct 2026)
+// build: v2 (25 Oct 2026) — el aviso de Telegram ahora guarda su message_id, para que
+// responderlo le llegue al tecnico como SMS (lo maneja fadc-agent).
+// v1 (21 Oct 2026)
 //
 // Right now the only outbound SMS this number sends is runTechnicianOutreach (fadc-agent),
 // cold outreach to technician prospects in fadc.technicians. So inbound replies here are
@@ -46,15 +48,22 @@ async function validSignature(params: Record<string, string>, signature: string 
   return b64 === signature;
 }
 
-async function notifyTeam(text: string) {
-  if (!TG_TOKEN || !TG_CHAT) return;
+// Devuelve el message_id de Telegram. Hace falta para que una respuesta a ese mensaje
+// pueda rastrearse de vuelta al tecnico que escribio (ver tg_reply_msg_id).
+async function notifyTeam(text: string): Promise<number | null> {
+  if (!TG_TOKEN || !TG_CHAT) return null;
   try {
-    await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+    const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ chat_id: TG_CHAT, text }),
     });
-  } catch (_) { /* best-effort */ }
+    const j = await res.json().catch(() => null);
+    const id = j?.result?.message_id;
+    return typeof id === "number" ? id : null;
+  } catch (_) {
+    return null; /* best-effort */
+  }
 }
 
 Deno.serve(async (req) => {
@@ -89,7 +98,15 @@ Deno.serve(async (req) => {
 
     if (tech) {
       await sql`update fadc.technicians set replied_at = now(), last_reply_at = now(), reply_text = ${body}, stage = case when stage = 'prospect' then 'replied' else stage end where id = ${tech.id}`;
-      await notifyTeam(`💬 Technician reply — ${tech.name} (${from}): "${body}"\nAnswer this one yourself, it's a negotiation call.`);
+      // El aviso lleva su propio message_id guardado: responder a ESTE mensaje en Telegram
+      // le manda un SMS al tecnico desde el 617. Sin esto el aviso era un callejon sin
+      // salida — llegaba la respuesta y no habia por donde contestarla.
+      const msgId = await notifyTeam(
+        `💬 Technician reply — ${tech.name} (${from}): "${body}"\n` +
+        `Reply to THIS message in Telegram and he gets it as a text from the 617.`);
+      if (msgId) {
+        await sql`update fadc.technicians set tg_reply_msg_id = ${msgId} where id = ${tech.id}`;
+      }
     } else {
       await notifyTeam(`💬 SMS reply from unknown number ${from}: "${body}"`);
     }
