@@ -68,7 +68,7 @@ let lastBadSigAlert = 0; // throttle for the bad-signature alarm below
 let lastProfileAlert = 0; // throttle for the broken-token alarm in getMessengerProfile
 const GRAPH_VERSION = "v21.0";
 
-const SYSTEM_PROMPT = `You are replying to customers on the Facebook Messenger inbox of Vonkam Home Services, a family-owned air duct, dryer vent and chimney cleaning company. You write as a member of the office team, the same way Michel writes. Write naturally and never bring up AI, automation or "the system", but never claim to be a specific human being either, and never deny being an assistant. If someone asks whether they are talking to a bot or a real person, do not argue: say you are on the Vonkam team here in the chat and offer to get them on a quick call with someone right away. That is both honest and the fastest way to close, people who ask that question are usually ready to buy and just want a human voice.
+const SYSTEM_PROMPT = `You are replying to customers on the Facebook Messenger inbox of Vonkam Home Services, an air duct, dryer vent and chimney cleaning company serving MA, NH, CT and RI. You write as a member of the office team, the same way Michel writes. Write naturally and never bring up AI, automation or "the system", but never claim to be a specific human being either, and never deny being an assistant. If someone asks whether they are talking to a bot or a real person, do not argue: say you are on the Vonkam team here in the chat and offer to get them on a quick call with someone right away. That is both honest and the fastest way to close, people who ask that question are usually ready to buy and just want a human voice.
 
 ## Your job
 Get the customer from "replied to the ad" to a qualified appointment request, then hand off. A qualified request has ALL of:
@@ -136,7 +136,7 @@ NEVER write long explanations or list everything the service includes unprompted
 - "What could change / what could increase pricing?" → "The tech inspects on-site and only mentions extras if your supply vents or buildup need more work, nothing gets done without your OK first. What's your ZIP and the best day for you?"
 - "Is $99 the flat rate?" → "Yes, $99 per heating/AC system. How many does your home have?"
 - "Do you cover [ZIP/city]?" → "Yes, we cover [ZIP]! What day works best for you?"
-- "Where are you located?" / "Are you in the area?" / "What areas do you serve?" / "Too far" / "Do you come to [place]?" → ANSWER IT like a person, in one sentence, then one question. We do jobs all over Massachusetts, Connecticut, Rhode Island and New Jersey and send the closest crew. Without their ZIP: "We do jobs all over MA, CT, RI and NJ. What's your ZIP? I'll check the closest crew to you." With their ZIP or town: "Yes, we cover [their town or ZIP]! We have crews all over MA, CT, RI and NJ." and then the next missing item. If they ask where the COMPANY is: "We're a family company out of the Boston area, with local crews all over MA, CT, RI and NJ." For a Connecticut customer add "In Connecticut your manager is Ben, want him to give you a quick call?" Never name a town for the office, never say a place is too far or outside the area.
+- "Where are you located?" / "Are you in the area?" / "What areas do you serve?" / "Too far" / "Do you come to [place]?" → ANSWER IT like a person, in one sentence, then one question. We do jobs all over Massachusetts, New Hampshire, Connecticut and Rhode Island and send the closest crew. Without their ZIP: "We do jobs all over MA, NH, CT and RI. What's your ZIP? I'll check the closest crew to you." With their ZIP or town: "Yes, we cover [their town or ZIP]! We have crews all over MA, NH, CT and RI." and then the next missing item. If they ask where the COMPANY is: "We're a Boston-area company, with local crews all over MA, NH, CT and RI." Never name a town for the office, never say a place is too far or outside the area. Never say "family owned", "30 years", "fully insured" or name a manager — those were the old brand's claims and they are not ours.
 - "What's the earliest / any time today?" → "The techs are already booked for today, the soonest I can get someone out to you is the next working day. What's your address and a good phone so I can lock it in?" Never promise or offer same-day.
 - Stating a town or ZIP ("we are in Mansfield", "I'm in 02048") is NEVER by itself a reason to set needs_human — it is a normal answer to the qualifying flow. Confirm you cover it and ask the next missing item (service, address, phone, day). Do not apologize ("Sorry about that!") for a location — nothing went wrong. Reserve needs_human for the cases this prompt actually lists (discount/hardship, 3+ systems, commercial/mold/insurance, reschedule of a confirmed job, spam) — not for ordinary qualifying answers you're simply unsure how to continue from.
 
@@ -169,7 +169,7 @@ Our best closes come from a person offering the right package. You must recogniz
 - Match their tone. Short, warm, casual, like a person texting from the office.
 
 ## Things you never do
-- NEVER tell a customer, directly or by implication, that they are outside our area or too far. Never name Belmont. You MAY say we are a family company out of the Boston area with local crews in MA, CT, RI and NJ, and that Ben is the Connecticut manager. You MAY say we do jobs all over MA, CT, RI and NJ (our ads say so). Never claim other states. A ZIP in any state is a normal lead: keep collecting, the owner assigns the crew.
+- NEVER tell a customer, directly or by implication, that they are outside our area or too far. Never name Belmont. You MAY say we are a Boston-area company with local crews in MA, NH, CT and RI. You MAY say we do jobs all over MA, NH, CT and RI (our ads say so). Never claim other states. A ZIP in any state is a normal lead: keep collecting, the owner assigns the crew.
 - NEVER turn a job away or tell a customer we don't do something. You do not decide what Vonkam takes on, the owner does. Commercial buildings, warehouses, apartment complexes, mold, sanitizing, asbestos, insurance claims, complaints, refunds: every one of these gets "Let me check with the team and get back to you in a bit." plus needs_human = true. Never "that's outside what we do", never suggest another company. A big commercial job is exactly the kind of money we do not hand to a competitor.
 - NEVER set stage to ready_to_confirm until you have the full street address, not just a ZIP. A ticket without a street address cannot be worked. If you have the day, window and phone but no address, ask: "Perfect! Last thing, what's the full street address so I can lock it in?"
 - CONFIRM the day and the 2-hour window directly, do not make them wait for a callback. A customer told to wait for confirmation goes and books someone else. If no tech turns out to be free, the team reschedules them, which is far easier than winning back a lead who went cold.
@@ -199,7 +199,7 @@ Never invent a specific slot as if it is already booked, never promise a tech by
 
 ## Objections: answer it, reassure, then steer back to the booking (every time)
 The goal of every message is the appointment. Never argue, never leave an objection hanging, never end on a dead end. One short answer, one reason to feel safe, one easy next step.
-- "Are you in my area? / Where are you? / That's far" → "Yes, we cover [their town or ZIP]! We have crews all over MA, CT, RI and NJ." then the next step. We ARE in those areas, never say or imply they are outside it.
+- "Are you in my area? / Where are you? / That's far" → "Yes, we cover [their town or ZIP]! We have crews all over MA, NH, CT and RI." then the next step. We ARE in those areas, never say or imply they are outside it.
 - "Is it really $99? / What's the catch?" → "Yes, $99 per system, and you only pay the day of service once it's done. The tech shows you before-and-after photos." then the next step.
 - "I'm working that day / can't do Friday" → "No problem! Mornings or afternoons better for you?" or offer another day. Never re-offer the day they turned down.
 - "Let me think / talk to my husband / check my schedule" → "Of course! No deposit, so I can pencil you in and you can move it anytime. Want me to hold [day] for you?"
@@ -450,12 +450,12 @@ const COPY: Record<string, Pair> = {
     es: "\u00a1Sin problema, que tengas buen d\u00eda!",
   },
   area: {
-    en: "Yes, we do jobs all over MA, CT, RI and NJ, the closest crew comes out to you.",
-    es: "Sí, trabajamos en todo MA, CT, RI y NJ, te mandamos el equipo más cercano.",
+    en: "Yes, we do jobs all over MA, NH, CT and RI, the closest crew comes out to you.",
+    es: "Sí, trabajamos en todo MA, NH, CT y RI, te mandamos el equipo más cercano.",
   },
   areaZip: {
-    en: "We do jobs all over MA, CT, RI and NJ. What's your ZIP? I'll check the closest crew to you.",
-    es: "Trabajamos en todo MA, CT, RI y NJ. ¿Cuál es tu código postal? Reviso el equipo más cercano.",
+    en: "We do jobs all over MA, NH, CT and RI. What's your ZIP? I'll check the closest crew to you.",
+    es: "Trabajamos en todo MA, NH, CT y RI. ¿Cuál es tu código postal? Reviso el equipo más cercano.",
   },
   softClose: {
     // v86: no question, no nudge. Make coming back easy and get out of the way.
@@ -1150,6 +1150,10 @@ const hitThinking = (t: string) => THINKING_RE.test(t) || THINKING_ES_RE.test(t)
 // question about where we are, or a "too far", is answered in code with one line and the next
 // missing item, and any reply that states or implies "outside our area" is rewritten. Can only
 // tighten: it never adds a refusal, it removes them.
+// 24 oct 2026: the states we name to a customer are now MA, NH, CT and RI. NJ came out (no
+// crew there and the technician sourcing no longer recruits it) and NH came in (southern NH
+// is where the leads land that Afek and Ilay can't reach). This net is unchanged either way:
+// it still never tells anyone they are too far, whatever ZIP they send.
 const AREA_Q_RE =
   /\b(where (are|r) (you|u|y'all|you guys) (located|based|at|from)|where'?s (your|the) (office|shop|company|business|location)|where (is|are) (your|the) (office|shop|company|business|location|team|crew)s?( located| based)?|where exactly\b|are (you|u) (local|in the area|around here)|too far|how far (are|is) (you|u|your)|(you|u) (are|r|guys are) (so |very )?far|(do|can|would) (you|u|y'all|you guys) (come|travel|go|service|serve|cover|reach) (to|out|in|near)|are (you|u) (near|close))\b|d[oó]nde (est[aá]n|quedan|se ubican)|muy lejos|queda lejos|est[aá] lejos/i;
 const AREA_LEAK_RE =
@@ -2225,24 +2229,28 @@ async function processInbound(input: {
       const isCT = /^06/.test(zipNow) || /\b(CT|Connecticut)\b/i.test(`${place} ${text}`);
       const hasPhone = !!(out.lead.phone || (lead.phone as string | null));
       // v74: "where is your company located?" gets the honest answer. Hiding it read as shady
-      // (Prince, 9 oct: "you didn't answer my question"). Connecticut has a local manager, Ben.
+      // (Prince, 9 oct: "you didn't answer my question").
+      // 24 oct: "family company" and "Ben, the Connecticut manager" are both gone. The first is
+      // the old brand's story, the second was a person who does not exist — a CT customer who
+      // accepted the call would have been promised someone we could not produce. The callback
+      // offer stays, because CT is the hardest zone to staff and a real call closes it, but it
+      // is now offered in the team's name and Michel is the one who calls.
       const base = es
-        ? "Somos una empresa familiar del área de Boston, con equipos locales en todo MA, CT, RI y NJ."
-        : "We're a family company out of the Boston area, with local crews all over MA, CT, RI and NJ.";
-      const ben = isCT ? (es ? " En Connecticut tu manager es Ben." : " In Connecticut your manager is Ben.") : "";
+        ? "Somos una empresa del área de Boston, con equipos locales en todo MA, NH, CT y RI."
+        : "We're a Boston-area company, with local crews all over MA, NH, CT and RI.";
       const areaLine = areaQ
-        ? `${base}${place ? (es ? ` ¡Sí cubrimos ${place}!` : ` Yes, we cover ${place}!`) : ""}${ben}`
+        ? `${base}${place ? (es ? ` ¡Sí cubrimos ${place}!` : ` Yes, we cover ${place}!`) : ""}`
         : place
-          ? (es ? `¡Sí, cubrimos ${place}! Tenemos equipos en todo MA, CT, RI y NJ.` : `Yes, we cover ${place}! We have crews all over MA, CT, RI and NJ.`)
+          ? (es ? `¡Sí, cubrimos ${place}! Tenemos equipos en todo MA, NH, CT y RI.` : `Yes, we cover ${place}! We have crews all over MA, NH, CT and RI.`)
           : say(COPY.area);
-      const benCall = isCT && hasPhone ? (es ? " ¿Quieres que Ben te llame rápido?" : " Want Ben to give you a quick call?") : "";
+      const ctCall = isCT && hasPhone ? (es ? " ¿Quieres que te llamemos rápido para cuadrarlo?" : " Want someone from the team to give you a quick call?") : "";
       // A customer who asked where we are gets the answer, not a slot in the same breath.
       const nextAfterArea = areaQ ? null : next;
       out.reply = zipKnown
-        ? (nextAfterArea ? `${areaLine} ${cap(nextAfterArea)}` : areaLine + (benCall || (areaQ ? (es ? " ¿Te queda mejor en la mañana o en la tarde?" : " Do mornings or afternoons work better for you?") : "")))
+        ? (nextAfterArea ? `${areaLine} ${cap(nextAfterArea)}` : areaLine + (ctCall || (areaQ ? (es ? " ¿Te queda mejor en la mañana o en la tarde?" : " Do mornings or afternoons work better for you?") : "")))
         : (areaQ ? `${base} ${es ? "¿Cuál es tu código postal? Reviso el equipo más cercano." : "What's your ZIP? I'll check the closest crew to you."}` : say(COPY.areaZip));
-      if (benCall) {
-        await notifyTeam(`\u{1F4CD} CT lead asked where we are; bot offered a call from Ben. ${(out.lead.phone || lead.phone) ?? ""} ZIP ${zipNow}`, "ct_call");
+      if (ctCall) {
+        await notifyTeam(`\u{1F4CD} CT lead asked where we are; the bot offered them a call back. Call them. ${(out.lead.phone || lead.phone) ?? ""} ZIP ${zipNow}`, "ct_call");
         specificAlert = true;
       }
       if (out.lead.stage === "closed_lost") out.lead.stage = "qualifying";
@@ -3463,6 +3471,13 @@ async function runTechnicianOutreach(dryRun: boolean): Promise<Record<string, un
       and opted_out = false
       and phone is not null
       and coalesce(zone, '') <> 'nj'
+      -- Fichas SEO de revendedores de leads, no técnicos. Dos redes, las dos verificadas a
+      -- mano el 24 oct contra 216 prospectos: el nombre termina en "<Pueblo>, <ST>" (42 de 42
+      -- eran basura, cero negocios reales atrapados), o dice "Air vent cleaning service" con
+      -- una palabra inventada delante. Si contestan es para vendernos leads, no para trabajar.
+      and name !~ ',\\s*(MA|NH|CT|RI)\\.?\\s*(\\d{5})?\\s*$'
+      and name !~* 'air vent cleaning servic'
+      and name !~* '\\y(media|marketing|seo)\\y'
       -- 8xx = central de franquicia: no recibe SMS y no es el técnico
       and right(regexp_replace(phone, '\\D', '', 'g'), 10) !~ '^8(00|33|44|55|66|77|88)'
     -- Zonas hueco primero (donde Afek e Ilay no llegan: sur de NH, Merrimack
