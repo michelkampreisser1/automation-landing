@@ -3521,9 +3521,11 @@ async function runStaleAppointments(dryRun: boolean): Promise<Record<string, unk
 const UPCOMING_DIGEST_KEY = "upcoming_digest_date";
 const UPCOMING_URGENT_KEY = "upcoming_urgent_date";
 
-function bostonToday(): string {
-  // en-CA da YYYY-MM-DD directo, que es lo que compara con slot_date (date).
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date());
+// bostonToday() ya existe arriba y devuelve un Date anclado al mediodia UTC justo para que
+// sumar dias no se tropiece con el cambio de horario. Esto solo lo pasa a YYYY-MM-DD, que es
+// con lo que se compara slot_date.
+function ymd(d: Date): string {
+  return d.toISOString().slice(0, 10);
 }
 
 async function settingEquals(key: string, value: string): Promise<boolean> {
@@ -3540,11 +3542,9 @@ async function settingSet(key: string, value: string): Promise<void> {
 
 async function runUpcomingJobs(dryRun: boolean): Promise<Record<string, unknown>> {
   const { hour } = bostonNow();
-  const today = bostonToday();
-  // Manana en hora de Boston, no en UTC: a las 8pm ET el dia UTC ya cambio y "manana" se
-  // calcularia un dia de mas, que es justo el error que haria callar la alerta de la vispera.
-  const tomorrow = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" })
-    .format(new Date(Date.now() + 24 * 3600 * 1000));
+  const hoy = bostonToday();
+  const today = ymd(hoy);
+  const tomorrow = ymd(new Date(hoy.getTime() + 24 * 3600 * 1000));
 
   const morning = hour >= 7 && hour < 10;
   const evening = hour >= 17 && hour < 20;
