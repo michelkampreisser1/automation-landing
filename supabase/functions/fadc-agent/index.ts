@@ -3502,6 +3502,126 @@ async function runStaleAppointments(dryRun: boolean): Promise<Record<string, unk
   };
 }
 
+// ── v149 (25 oct 2026): el vigilante que faltaba — la cita que YA VIENE.
+//
+// Mary Lou se agendo el 19 oct para el lunes 26. runStaleAppointments aviso UNA vez, el 21 oct
+// a las 12:10, y se estampo dispatch_alerted_at; el codigo solo avisa cuando esa columna esta
+// null, asi que nunca volvio a hablar. La cita llego a 24 horas de distancia sin tecnico y sin
+// que sonara nada. Michel se dio cuenta solo.
+//
+// La falla no fue el aviso: fue que NADA en el sistema mira que tan cerca esta la fecha. Para
+// runStaleAppointments una cita sin tecnico a 7 dias y una a 12 horas son identicas. Y a la
+// clienta tampoco le iba a escribir: el unico mensaje automatico al cliente es por fecha
+// faltante (date_chases), y ella ya tenia fecha — lo que faltaba era el tecnico, que ella no
+// puede resolver.
+//
+// Esto es un digest, no una alerta por cita: UN mensaje en la manana con los trabajos de hoy
+// y manana, y uno solo en la tarde si manana sigue sin tecnico. Dos mensajes al dia como techo,
+// aunque haya seis citas. El resto del dia calla.
+const UPCOMING_DIGEST_KEY = "upcoming_digest_date";
+const UPCOMING_URGENT_KEY = "upcoming_urgent_date";
+
+function bostonToday(): string {
+  // en-CA da YYYY-MM-DD directo, que es lo que compara con slot_date (date).
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date());
+}
+
+async function settingEquals(key: string, value: string): Promise<boolean> {
+  const [row] = await sql<{ value: string }[]>`
+    select value from fadc.settings where key = ${key}`;
+  return row?.value === value;
+}
+
+async function settingSet(key: string, value: string): Promise<void> {
+  await sql`
+    insert into fadc.settings (key, value, updated_at) values (${key}, ${value}, now())
+    on conflict (key) do update set value = excluded.value, updated_at = now()`;
+}
+
+async function runUpcomingJobs(dryRun: boolean): Promise<Record<string, unknown>> {
+  const { hour } = bostonNow();
+  const today = bostonToday();
+  // Manana en hora de Boston, no en UTC: a las 8pm ET el dia UTC ya cambio y "manana" se
+  // calcularia un dia de mas, que es justo el error que haria callar la alerta de la vispera.
+  const tomorrow = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" })
+    .format(new Date(Date.now() + 24 * 3600 * 1000));
+
+  const morning = hour >= 7 && hour < 10;
+  const evening = hour >= 17 && hour < 20;
+  if (!dryRun && !morning && !evening) return { skipped: "outside digest windows", hour };
+
+  const rows = await sql<{
+    id: string; slot_date: string; preferred_window: string | null; tech: string | null;
+    status: string; ticket_msg_id: number | null;
+    first_name: string | null; phone: string | null; town: string | null; zip: string | null;
+    service: string | null;
+  }[]>`
+    select a.id, a.slot_date::text as slot_date, a.tech, a.status, a.ticket_msg_id,
+           l.first_name, l.phone, l.town, l.zip, l.service, l.preferred_window
+      from fadc.appointments a
+      join fadc.leads l on l.id = a.lead_id
+     where a.status in ('pending', 'confirmed', 'rescheduled')
+       and a.slot_date is not null
+       and a.slot_date between ${today}::date and ${tomorrow}::date
+     order by a.slot_date asc, a.tech nulls first`;
+
+  if (rows.length === 0) return { checked: 0, sent: null };
+
+  // El order by de SQL no puede ordenar "10-12" antes de "1-3": son texto, y en texto "1"
+  // va primero. Las ventanas se escriben en reloj de 12 h sin am/pm, asi que 1-6 es tarde
+  // y 7-12 manana. Sin esto el digest no se lee como la ruta del dia.
+  const horaDe = (w: string | null): number => {
+    const n = Number(String(w ?? "").match(/\d{1,2}/)?.[0] ?? NaN);
+    if (!Number.isFinite(n)) return 99; // sin ventana: al final
+    return n >= 1 && n <= 6 ? n + 12 : n;
+  };
+  rows.sort((a, b) =>
+    a.slot_date.localeCompare(b.slot_date) || horaDe(a.preferred_window) - horaDe(b.preferred_window));
+
+  const sinTecnico = rows.filter((r) => !r.tech);
+
+  const linea = (r: typeof rows[number]) => {
+    const cuando = r.slot_date === today ? "HOY" : "MAÑANA";
+    const donde = [r.town, r.zip].filter(Boolean).join(" ");
+    const ventana = r.preferred_window ? ` ${r.preferred_window}` : "";
+    const quien = r.tech ? `→ ${r.tech}` : "⚠️ SIN TÉCNICO";
+    return `${cuando}${ventana} · ${r.first_name ?? "cliente"}${donde ? ` (${donde})` : ""} · ` +
+      `${r.service ?? "trabajo"} · ${quien}${r.phone ? ` · ${r.phone}` : ""}`;
+  };
+
+  // ── Vispera: solo si manana hay algo sin tecnico. Si todo tiene tecnico, no se manda nada
+  // en la tarde — el digest de la manana ya lo dijo.
+  if (evening) {
+    const mananaSinTec = sinTecnico.filter((r) => r.slot_date === tomorrow);
+    if (mananaSinTec.length === 0) return { checked: rows.length, sent: null, note: "tarde: manana todo con tecnico" };
+    if (!dryRun && await settingEquals(UPCOMING_URGENT_KEY, today)) {
+      return { checked: rows.length, sent: null, note: "urgente ya enviado hoy" };
+    }
+    const body =
+      `🚨 MAÑANA sin técnico (${mananaSinTec.length}):\n` +
+      mananaSinTec.map(linea).join("\n") +
+      `\n\nO asignas técnico (responde al ticket con el nombre) o hay que mover la cita hoy mismo.`;
+    if (dryRun) return { checked: rows.length, would_send: body };
+    await notifyTeam(body, "upcoming_no_tech");
+    await settingSet(UPCOMING_URGENT_KEY, today);
+    return { checked: rows.length, sent: "urgente", sin_tecnico: mananaSinTec.length };
+  }
+
+  // ── Manana: el digest del dia, una sola vez.
+  if (!dryRun && await settingEquals(UPCOMING_DIGEST_KEY, today)) {
+    return { checked: rows.length, sent: null, note: "digest ya enviado hoy" };
+  }
+  const body =
+    `📅 Hoy y mañana: ${rows.length} trabajo${rows.length === 1 ? "" : "s"}` +
+    (sinTecnico.length ? ` · ${sinTecnico.length} sin técnico` : " · todos asignados") + `\n` +
+    rows.map(linea).join("\n") +
+    (sinTecnico.length ? `\n\nResponde al ticket de cada uno con el nombre del técnico.` : "");
+  if (dryRun) return { checked: rows.length, would_send: body };
+  await notifyTeam(body, "upcoming_jobs");
+  await settingSet(UPCOMING_DIGEST_KEY, today);
+  return { checked: rows.length, sent: "digest", sin_tecnico: sinTecnico.length };
+}
+
 // v130: cold SMS outreach to technician_pipeline (fadc.technicians) prospects — daily, capped,
 // B2B-hours-only, and intentionally NOT auto-sent to customers (see runStaleAppointments /
 // runAmountChase for the customer-facing watchers, which still go through Messenger). Michel
@@ -4616,9 +4736,13 @@ async function handle(req: Request): Promise<Response> {
       // v87: the booking itself, once it exists, is the thing nothing was watching.
       let staleAppts: Record<string, unknown> = {};
       try { staleAppts = await runStaleAppointments(body.dry_run === true); } catch (e) { staleAppts = { error: e instanceof Error ? e.message : String(e) }; }
+      // v149: la cita que ya viene. runStaleAppointments avisa una vez y se calla para
+      // siempre; esto mira la cercania de la fecha, que es lo que nadie miraba.
+      let upcoming: Record<string, unknown> = {};
+      try { upcoming = await runUpcomingJobs(body.dry_run === true); } catch (e) { upcoming = { error: e instanceof Error ? e.message : String(e) }; }
       const fu = await runFollowups(body.dry_run === true);
       await heartbeat("fadc_followups", true);
-      return json(200, { ...fu, resume, humanNudge, leaks, unanswered, ticketSweep, ticketChanges, reviewFollowups, amountChase, staleAppts });
+      return json(200, { ...fu, resume, humanNudge, leaks, unanswered, ticketSweep, ticketChanges, reviewFollowups, amountChase, staleAppts, upcoming });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       await heartbeat("fadc_followups", false, msg);
