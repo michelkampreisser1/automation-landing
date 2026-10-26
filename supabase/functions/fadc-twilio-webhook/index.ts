@@ -27,7 +27,25 @@ const TG_CHAT = Deno.env.get("TELEGRAM_CHAT_ID") ?? "";
 const WEBHOOK_URL = Deno.env.get("FADC_TWILIO_WEBHOOK_URL")
   ?? "https://lvqeucpqgqcxsghqsemn.supabase.co/functions/v1/fadc-twilio-webhook";
 
-const STOP_WORDS = new Set(["stop", "stopall", "stop all", "unsubscribe", "cancel", "quit", "end"]);
+// 26 oct 2026: antes era un Set y se comparaba con el mensaje COMPLETO, asi que solo
+// cachaba un SMS cuyo texto fuera exactamente "stop".
+//
+// Paula S. de McCarthy Cleaning (+16038861867, Hudson NH) escribio dos veces
+// "Paula S. from McCarthy Cleaning Co.: stop". Un Set no la cacha: habria quedado
+// archivada como respuesta normal y el opt-out se pierde. Muchos negocios textean desde
+// apps o servicios de recados que anteponen el nombre de quien escribe, asi que el
+// prefijo es lo normal, no la excepcion.
+//
+// Ahora se acepta la palabra al final del mensaje, con o sin prefijo. Deliberadamente
+// permisivo: marcar de mas a alguien que no queria salirse cuesta un prospecto; marcar de
+// menos a alguien que SI pidio salirse cuesta un reporte de spam y el numero. Los limites
+// de palabra evitan los falsos amigos obvios ("weekend" y "send" no disparan "end").
+const STOP_RE =
+  /(?:^|[:\-\u2013\u2014]\s*|\s)(stop\s?all|stop|unsubscribe|cancel|quit|end)\s*[.!]?\s*$/i;
+
+function esOptOut(texto: string): boolean {
+  return STOP_RE.test(texto.trim());
+}
 
 function twiml(body?: string): Response {
   const xml = body
@@ -125,7 +143,7 @@ Deno.serve(async (req) => {
 
     if (!from) return twiml();
 
-    if (STOP_WORDS.has(normalized)) {
+    if (esOptOut(normalized)) {
       await sql`update fadc.technicians set opted_out = true, last_reply_at = now(), reply_text = ${body} where phone = ${from}`;
       await notifyTeam(`🛑 Technician opt-out: ${from} replied "${body}". Marked opted_out, no more texts to this number.`);
       return twiml("You've been unsubscribed and won't receive more texts from Vonkam Home Services.");
