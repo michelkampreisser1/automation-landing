@@ -77,7 +77,45 @@ Deno.serve(async (req) => {
 
     const signature = req.headers.get("X-Twilio-Signature");
     if (!(await validSignature(params, signature))) {
-      console.error("fadc-twilio-webhook: bad signature", { signature });
+      // 26 oct 2026: ESTE 403 ERA EL UNICO CAMINO MUDO DE TODA LA FUNCION.
+      //
+      // McCarthy Cleaning Company (+16038861867, Hudson NH) recibio el SMS del outreach a
+      // las 10:30:01 ET y contesto DOS VECES a la 1:08 PM. Twilio lo registro como
+      // "Received". En la base quedo last_reply_at nulo, reply_text nulo y stage en
+      // 'prospect'. Michel no vio nada. De 45 SMS mandados desde el 22 oct, la base decia
+      // cero respuestas y cero opt-outs -- un cero perfecto que parecia desinteres y era
+      // esto.
+      //
+      // Todos los demas caminos avisan a Telegram, incluso cuando el numero es desconocido.
+      // Solo este se iba en silencio, que es justo el que falla cuando la URL configurada en
+      // Twilio no coincide EXACTO con WEBHOOK_URL (y el numero vive en un Messaging Service,
+      // asi que el webhook se configura en el servicio, no en el numero).
+      //
+      // Ahora grita. Limitado a un aviso por hora para que un bot pegandole al endpoint no
+      // convierta esto en otra fuente de ruido.
+      console.error("fadc-twilio-webhook: bad signature", { signature: !!signature });
+      try {
+        const [reciente] = await sql<{ hay: boolean }[]>`
+          select true as hay from fadc.notifications
+           where kind = 'twilio_bad_signature' and created_at > now() - interval '1 hour'
+           limit 1`;
+        if (!reciente) {
+          const motivo = !TWILIO_TOKEN
+            ? "falta TWILIO_AUTH_TOKEN en los secretos de Supabase"
+            : !signature
+            ? "la peticion llego SIN cabecera X-Twilio-Signature"
+            : `la firma no cuadra: la URL configurada en Twilio no coincide con ${WEBHOOK_URL}`;
+          const texto =
+            `\u{1F6A8} SMS ENTRANTE RECHAZADO\n` +
+            `Alguien escribio al 617 y lo tiramos sin leerlo.\n` +
+            `De: ${params["From"] ?? "desconocido"}\n` +
+            `Motivo: ${motivo}\n` +
+            `Revisa el webhook del Messaging Service en Twilio (no el del numero).`;
+          await notifyTeam(texto);
+          await sql`insert into fadc.notifications (kind, text, delivered_telegram)
+                    values ('twilio_bad_signature', ${texto}, true)`;
+        }
+      } catch (_) { /* el aviso nunca bloquea la respuesta a Twilio */ }
       return new Response("forbidden", { status: 403 });
     }
 
