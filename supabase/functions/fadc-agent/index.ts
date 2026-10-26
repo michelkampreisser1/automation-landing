@@ -1344,7 +1344,13 @@ const TG_SILENCIO = new Set([
   "paused_reply",     // 3.4/día — lo cubre unanswered15, que sí escala
   "attachment",       // 1.6/día — "X mandó una imagen"
   "appointment_stuck",// el tablero ya tiene "Citas próximas sin técnico" en rojo
-  "coverage_none",    // igual: duplica lo que el propio ticket ya dice
+  // 26 oct: coverage_none SALE de esta lista. Lo meti aqui el 25 pensando que duplicaba
+  // lo que el ticket ya dice, y al dia siguiente costo caro: George Giampetro (08330
+  // Mays Landing NJ, 274 millas) quedo agendado a las 11:28, y un segundo despues el
+  // sistema disparo exactamente la alerta correcta -- "ZIP 08330 sin cobertura, ticket
+  // listo pero sin tecnico ni subcontratista" -- que nadie vio porque yo la habia
+  // apagado. El ticket NO dice que nadie puede ir; esa es justo la informacion que
+  // falta. Un trabajo que nadie puede ejecutar siempre amerita sonar.
   "coverage_sub",
   "area",             // ZIP fuera de zona; el agente sigue recolectando igual
   "human_nudge",
@@ -3670,15 +3676,22 @@ async function runTechnicianOutreach(dryRun: boolean): Promise<Record<string, un
       and name !~* '(media|marketing|seo)\\y'
       -- 8xx = central de franquicia: no recibe SMS y no es el técnico
       and right(regexp_replace(phone, '\\D', '', 'g'), 10) !~ '^8(00|33|44|55|66|77|88)'
-    -- Zonas hueco primero (donde Afek e Ilay no llegan: sur de NH, Merrimack
-    -- Valley, North Shore, SE MA/Cape, Springfield — zone 'other'), sur de NH
-    -- al frente; luego Worcester/Providence, y al final Hartford/Boston.
+    -- 26 oct 2026: EL ORDEN ESTABA AL REVES DE DONDE ESTA EL DINERO.
+    -- Ponia el sur de NH primero y Boston al final. Esta manana gasto los 20 textos del
+    -- dia en zone 'other': 17 en New Hampshire y 3 en el centro de Connecticut.
+    -- Providence, con 6 prospectos sin textear, no recibio ninguno.
+    --
+    -- Los 5 trabajos cobrados hasta hoy: Hyde Park MA ($1,282), East Taunton MA ($200),
+    -- Johnston RI, Cranston RI ($620) -- o sea Boston y Providence -- mas dos en el ESTE
+    -- de Connecticut (Norwich $299, North Windham $150). Cero en New Hampshire, cero en
+    -- el centro de CT. Y ninguno de los dos tecnicos llega a NH: Hollis queda a 36.3 mi
+    -- de Afek, cuyo radio es 35.
+    --
+    -- Se recluta donde el negocio ya cobra, no donde no llega nadie.
     order by case
-               when zone = 'other' and base_town ~* '\\mNH\\M' then 0
-               when zone = 'other' then 1
-               when zone in ('worcester','providence') then 2
-               when zone = 'hartford' then 3
-               else 4
+               when zone in ('boston','providence') then 0
+               when zone = 'worcester' then 1
+               else 2
              end,
              created_at desc
     limit ${dailyCap}

@@ -230,12 +230,21 @@ Deno.serve(async (req: Request) => {
       }
     };
 
-    // Cola que importa: prospectos sin textear en zona hueco.
+    // Cola que importa: prospectos sin textear en las zonas que HOY se estan buscando.
+    //
+    // 26 oct: antes contaba solo zone = 'other' (sur de NH). Ese dia se apagaron las
+    // consultas de 'other' y 'hartford' y el buscador se reapunto a Boston, Providence y
+    // Worcester, que es donde estan los 5 trabajos cobrados. Con el conteo viejo el
+    // freno habria quedado midiendo una cola que ya nadie llena: 36 prospectos de NH
+    // congelados para siempre, mientras Providence se quedaba sin buscar.
+    //
+    // Ahora la cola se mide contra las zonas con consultas activas, asi el freno sigue
+    // al objetivo sin tener que tocar codigo cada vez que cambia la estrategia.
     const gapQueue = async () => {
       const [{ queue }] = await sql!<{ queue: number }[]>`
         select count(*)::int as queue from fadc.technicians
         where stage = 'prospect' and sms_sent_at is null and not opted_out
-          and zone = ${GAP_ZONE}
+          and zone in (select distinct zone from fadc.sourcing_queries where active)
       `;
       return queue;
     };
