@@ -3563,6 +3563,12 @@ async function runUpcomingJobs(dryRun: boolean): Promise<Record<string, unknown>
      where a.status in ('pending', 'confirmed', 'rescheduled')
        and a.slot_date is not null
        and a.slot_date between ${today}::date and ${tomorrow}::date
+       -- no_followup_until en el futuro = una persona ya decidio dejar esto en paz hasta esa
+       -- fecha. David (Hollis NH) cancelo el 24 oct y vuelve en ~2 semanas, pero su cita se
+       -- quedo con slot_date del 26: sin este filtro el digest gritaria por el cada manana
+       -- sin que haya nada que hacer, que es como se mata un canal de avisos.
+       and (l.no_followup_until is null or l.no_followup_until <= now())
+       and l.stage <> 'closed_lost'
      order by a.slot_date asc, a.tech nulls first`;
 
   if (rows.length === 0) return { checked: 0, sent: null };
