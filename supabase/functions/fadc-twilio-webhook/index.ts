@@ -143,6 +143,16 @@ Deno.serve(async (req) => {
 
     if (!from) return twiml();
 
+    // 26 oct: todo entrante queda en el hilo (fadc.sms_log), pase lo que pase despues.
+    // Es la materia prima del console de Michel y la razon de que una respuesta ya no
+    // pueda evaporarse aunque una rama posterior falle.
+    try {
+      await sql`insert into fadc.sms_log (phone, tech_id, direction, body, sent_by, twilio_sid)
+                select ${from}, t.id, 'in', ${body}, 'webhook', ${params["MessageSid"] ?? null}
+                  from (values (1)) as _
+                  left join fadc.technicians t on t.phone = ${from}`;
+    } catch (e) { console.error("sms_log insert:", e instanceof Error ? e.message : String(e)); }
+
     if (esOptOut(normalized)) {
       await sql`update fadc.technicians set opted_out = true, last_reply_at = now(), reply_text = ${body} where phone = ${from}`;
       await notifyTeam(`🛑 Technician opt-out: ${from} replied "${body}". Marked opted_out, no more texts to this number.`);
