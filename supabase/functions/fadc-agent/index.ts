@@ -74,6 +74,7 @@ const SYSTEM_PROMPT = `You are replying to customers on the Facebook Messenger i
 Get the customer from "replied to the ad" to a qualified appointment request, then hand off. A qualified request has ALL of:
 1. service (air ducts / dryer vent / chimney, or a combination)
 2. for air ducts: how many heating/AC systems the home has (price is $99 per system, so this sets the total, e.g. 2 systems = $198). Ask this naturally when they ask about air-duct price or after they say they want air ducts. Skip for dryer-vent-only.
+2b. for air ducts: a rough count of supply vents / registers (see "Size capture" below). ONE follow-up, never a blocker.
 3. ZIP code (or town + state)
 4. best phone number
 5. preferred day and a 2-hour time window
@@ -139,6 +140,59 @@ NEVER write long explanations or list everything the service includes unprompted
 - "Where are you located?" / "Are you in the area?" / "What areas do you serve?" / "Too far" / "Do you come to [place]?" → ANSWER IT like a person, in one sentence, then one question. We do jobs all over Massachusetts, New Hampshire, Connecticut and Rhode Island and send the closest crew. Without their ZIP: "We do jobs all over MA, NH, CT and RI. What's your ZIP? I'll check the closest crew to you." With their ZIP or town: "Yes, we cover [their town or ZIP]! We have crews all over MA, NH, CT and RI." and then the next missing item. If they ask where the COMPANY is: "We're a Boston-area company, with local crews all over MA, NH, CT and RI." Never name a town for the office, never say a place is too far or outside the area. Never say "family owned", "30 years", "fully insured" or name a manager — those were the old brand's claims and they are not ours.
 - "What's the earliest / any time today?" → "The techs are already booked out a couple of days, the soonest I can usually lock in is [the day nextSlot offers]. What's your address and a good phone so I can hold it for you?" Never promise or offer same-day. If they push that it HAS to be today or tomorrow (an urgent or time-boxed situation, not just a preference), do NOT book it and do NOT turn them away: say "Let me check with the team if we can squeeze you in sooner — I'll come right back to you." and set needs_human to true, keeping their address and phone. A rush job is a dispatch decision, not a bot decision.
 - Stating a town or ZIP ("we are in Mansfield", "I'm in 02048") is NEVER by itself a reason to set needs_human — it is a normal answer to the qualifying flow. Confirm you cover it and ask the next missing item (service, address, phone, day). Do not apologize ("Sorry about that!") for a location — nothing went wrong. Reserve needs_human for the cases this prompt actually lists (discount/hardship, 3+ systems, commercial/mold/insurance, reschedule of a confirmed job, spam) — not for ordinary qualifying answers you're simply unsure how to continue from.
+
+## SERVICE AREA — ask the ZIP before you name a time. HARD RULE.
+
+Ask for the ZIP as the THIRD question, right after you know (1) which service and (2) how
+many systems. Measured on 127 leads: when the ZIP was asked on turn 3-4, 68% gave it and 26%
+booked — the best of any ordering. Asking it on turn 1-2 also works (63%). Never asking it is
+what loses people: of the leads that never got the question, 16% gave a ZIP and 6% booked.
+
+NEVER offer, hold or confirm a day or a time window before a ZIP is on file. On 26 oct the bot
+confirmed "Tuesday 9 to 11" for a customer in Mays Landing, New Jersey — 279 miles away, with
+the ZIP already in the database — because the slot was offered before anyone looked at where
+he lived. If you do not have a ZIP yet, say:
+
+  "Let me check who covers your area first — what's your ZIP code?"
+
+instead of naming a time.
+
+If the customer gives a TOWN, city or street address instead of a ZIP, accept it. Do not
+re-ask for a ZIP you can already work out from the town; just carry on and let the system
+resolve it. Only if the town name is ambiguous across states, ask "Which state is that in?"
+
+Ask for one thing at a time. Never bundle ZIP, phone, name and address into one message.
+
+## Size capture (ask ONCE, right after the systems count)
+
+WHY THIS EXISTS. The biggest job this business has ever billed was $1,282 — seven vents,
+sanitation and two UV lights on a ticket whose base was $99. It is 50% of everything ever
+collected. Yet across 403 agent messages containing the word "vent", the bot has asked for a
+vent count exactly ZERO times, and job_scale is empty on 116 of 127 leads. A lead in Medford
+wrote "I'm looking to have my supply vents cleaned most importantly" and "do you price per
+vent or per room?"; the bot answered three times that the tech quotes on-site, never put a
+number to it, and the customer left with "I'll get back to you". The tech cannot sell what
+nobody wrote down.
+
+After the customer gives the number of heating/AC systems, ask ONE follow-up before the ZIP:
+
+  "Got it, $99 for your [N] system. Roughly how many supply vents or registers do you have
+   in the house? A rough count is fine, it just tells the tech what to bring."
+
+Rules:
+- Ask it ONCE. If they do not know, move on immediately: "No problem, the tech will count
+  them on-site." Never ask twice, never hold up a booking over it.
+- Write the answer into job_scale as "<N> system(s), <V> supply vents", e.g.
+  "1 system, 11 supply vents". If unknown: "<N> system(s), vent count unknown". Append
+  "+ <N> dryer vent" when a dryer vent is part of the job.
+- NEVER say or imply the supply vents are covered by the $99. If asked: "The $99 covers the
+  main duct system. The vents are priced separately — the tech counts them and gives you the
+  price before he starts, and nothing gets done without your OK."
+- If they push for a number on the vents, do not invent one and do not just refuse: "That one
+  the tech prices on-site once he sees them, and you approve it before any work starts. With
+  [V] vents it's worth having him look at them on the same visit, so it's one trip."
+- If the customer names a vent count on their own at ANY point, including after the
+  appointment is booked, update job_scale with that number right away.
 
 ## Multi-family / 2-family / duplex / "forced air no AC"
 Count HEATING/AC SYSTEMS, not units or square feet. A 2-family house with one shared forced-air furnace = 1 system = $99. A 2-family with a furnace in each unit = 2 systems = $198. "Forced air" is just the heating type, it does NOT mean more than one system. Ask: "How many heating or AC systems total, one furnace, or one per unit?"
@@ -2511,13 +2565,39 @@ async function processInbound(input: {
     const pause = stage === "ready_to_confirm" || hardHandoff || misclick;
     void keepTalking;
 
+    // 6b. PUEBLO -> ZIP (26 oct). Cinco leads dieron el pueblo y se quedaron con zip nulo:
+    // "we are in Mansfield" -> town=Mansfield, zip=null. No es culpa del modelo, es que
+    // nadie resolvia el pueblo. Sin ZIP no hay forma de saber si el trabajo es alcanzable,
+    // y el 59% de los leads no lo tiene.
+    //
+    // Se resuelve contra fadc.zip_geo, limitado a los cuatro estados de servicio: hay un
+    // Springfield en cuatro estados y adivinar mal es peor que no saber. Si el pueblo sale
+    // en mas de un estado de los nuestros, no se inventa nada y se deja nulo.
+    let zipDerivado: string | null = null;
+    const townIn = (L.town ?? null) as string | null;
+    if (!L.zip && !lead.zip && townIn && townIn.trim().length > 2) {
+      try {
+        // Un pueblo con VARIOS zips en un mismo estado si es resoluble: cualquiera de ellos
+        // sirve para medir alcance (Medford MA tiene 2, Worcester 16, y todos estan donde
+        // uno espera). Lo que NO se puede adivinar es un pueblo que existe en dos estados
+        // nuestros -- Springfield esta en MA y en NH, Bristol en CT, NH y RI -- y errarle
+        // manda a un tecnico al estado equivocado. Esos se quedan nulos a proposito.
+        const [fila] = await sql<{ zip: string; estados: number }[]>`
+          select min(zip) as zip, count(distinct state)::int as estados
+            from fadc.zip_geo
+           where lower(city) = lower(${townIn.trim()})
+             and state = any(array['MA','NH','CT','RI'])`;
+        if (fila?.zip && fila.estados === 1) zipDerivado = fila.zip;
+      } catch (_) { /* nunca bloquear la respuesta al cliente */ }
+    }
+
     // 6. Persist lead fields (never overwrite a known value with null)
     await sql`
       update fadc.leads set
         first_name       = coalesce(${L.first_name ?? null}, first_name),
         last_name        = coalesce(${L.last_name ?? null}, last_name),
         service          = coalesce(${L.service ?? null}, service),
-        zip              = coalesce(${L.zip ?? null}, zip),
+        zip              = coalesce(${L.zip ?? null}, zip, ${zipDerivado}),
         town             = coalesce(${L.town ?? null}, town),
         phone            = coalesce(${L.phone ?? null}, phone),
         preferred_day    = coalesce(${L.preferred_day ?? null}, preferred_day),
@@ -3550,6 +3630,90 @@ async function settingSet(key: string, value: string): Promise<void> {
   await sql`
     insert into fadc.settings (key, value, updated_at) values (${key}, ${value}, now())
     on conflict (key) do update set value = excluded.value, updated_at = now()`;
+}
+
+// ── v153 (27 oct 2026): LA CITA QUE NADIE TOMA ────────────────────────────────────────
+//
+// De las 16 citas que no se ejecutaron desde el 4 oct, CATORCE nunca tuvieron tecnico
+// asignado. Y no fue por distancia: Chris estaba a 0 millas de un ZIP donde la red ya cobro,
+// Duan a 4, Ramiro a 10. El ticket salia a Telegram y se quedaba ahi hasta que alguien
+// tuviera tiempo; seis del 6 al 8 de octubre murieron juntas asi.
+//
+// runStaleAppointments ya avisa, pero UNA sola vez y para siempre (dispatch_alerted_at), y
+// runUpcomingJobs solo mira hoy y manana. Entre el dia que se agenda y la vispera no habia
+// nada. Esto llena ese hueco: una cita sin tecnico vuelve a sonar a las 24 h y otra vez a
+// las 72 h, cada vez mas fuerte, y dice QUIEN puede tomarla para que asignarla sea responder
+// con un nombre y no una investigacion.
+const ESCALADA_HORAS = [24, 72];
+
+async function runUnassignedEscalation(dryRun: boolean): Promise<Record<string, unknown>> {
+  const rows = await sql<{
+    id: string; lead_id: string; slot_date: string | null; ticket_msg_id: number | null;
+    horas: number; avisos: number;
+    first_name: string | null; town: string | null; zip: string | null;
+    phone: string | null; service: string | null; preferred_window: string | null;
+  }[]>`
+    select a.id, a.lead_id, a.slot_date::text as slot_date, a.ticket_msg_id,
+           round(extract(epoch from (now() - a.created_at)) / 3600)::int as horas,
+           coalesce(a.unassigned_alerts, 0) as avisos,
+           l.first_name, l.town, l.zip, l.phone, l.service, l.preferred_window
+      from fadc.appointments a
+      join fadc.leads l on l.id = a.lead_id
+     where a.status in ('pending', 'confirmed', 'rescheduled')
+       and a.tech is null
+       and a.created_at < now() - interval '24 hours'
+       and (a.slot_date is null or a.slot_date >= current_date)
+       and l.stage <> 'closed_lost'
+       and (l.no_followup_until is null or l.no_followup_until <= now())
+     order by a.created_at asc
+     limit 20`;
+
+  const results: Array<Record<string, unknown>> = [];
+  for (const r of rows) {
+    // Cuantos avisos le tocan ya por su edad, contra cuantos lleva.
+    const debidos = ESCALADA_HORAS.filter((h) => r.horas >= h).length;
+    if (debidos <= r.avisos) continue;
+
+    // Quien puede tomarla. Es la diferencia entre "alguien atienda esto" y una decision de
+    // un segundo: Michel responde el ticket con el nombre y queda asignada.
+    let quien = "nadie en el sistema alcanza ese ZIP";
+    if (r.zip) {
+      try {
+        const techs = await sql<{ tecnico: string; millas: number }[]>`
+          select tecnico, millas from fadc.quien_llega_a(${r.zip}, null) order by millas`;
+        if (techs.length) {
+          quien = techs.map((t) => `${t.tecnico} (${Math.round(t.millas)} mi)`).join(", ");
+        }
+      } catch (_) { /* el aviso sale igual */ }
+    }
+
+    const dias = r.slot_date
+      ? Math.round((Date.parse(r.slot_date + "T12:00:00Z") - Date.now()) / 86_400_000)
+      : null;
+    const cuando = r.slot_date
+      ? `${r.slot_date}${r.preferred_window ? ` ${r.preferred_window}` : ""}` +
+        (dias !== null ? ` (en ${dias} dia${dias === 1 ? "" : "s"})` : "")
+      : "SIN FECHA";
+
+    const urgencia = debidos >= 2 ? "\u{1F6A8}\u{1F6A8}" : "\u{1F6A8}";
+    const body =
+      `${urgencia} CITA SIN TECNICO, ${r.horas} HORAS YA\n` +
+      `${r.first_name ?? "Cliente"}${r.town ? ` \u00b7 ${r.town}` : ""}${r.zip ? ` ${r.zip}` : ""}\n` +
+      `${r.service ?? "trabajo"} \u00b7 ${cuando}\n` +
+      `${r.phone ? `${r.phone}\n` : ""}` +
+      `${quien}\n` +
+      (r.ticket_msg_id
+        ? "Responde al ticket de esta cita con el nombre del tecnico y queda asignada."
+        : "Esta cita no tiene ticket con el que se pueda responder \u2014 asignala a mano.");
+
+    if (dryRun) { results.push({ appointment: r.id, name: r.first_name, would_send: body }); continue; }
+    await notifyTeamFor(r.lead_id, body, "unassigned_escalation");
+    await sql`update fadc.appointments
+                 set unassigned_alerts = ${debidos}, updated_at = now()
+               where id = ${r.id}`;
+    results.push({ appointment: r.id, name: r.first_name, aviso: debidos, horas: r.horas });
+  }
+  return { checked: rows.length, escalated: results.filter((x) => x.aviso).length, results };
 }
 
 async function runUpcomingJobs(dryRun: boolean): Promise<Record<string, unknown>> {
@@ -4776,9 +4940,11 @@ async function handle(req: Request): Promise<Response> {
       // siempre; esto mira la cercania de la fecha, que es lo que nadie miraba.
       let upcoming: Record<string, unknown> = {};
       try { upcoming = await runUpcomingJobs(body.dry_run === true); } catch (e) { upcoming = { error: e instanceof Error ? e.message : String(e) }; }
+      let unassigned: Record<string, unknown> = {};
+      try { unassigned = await runUnassignedEscalation(body.dry_run === true); } catch (e) { unassigned = { error: e instanceof Error ? e.message : String(e) }; }
       const fu = await runFollowups(body.dry_run === true);
       await heartbeat("fadc_followups", true);
-      return json(200, { ...fu, resume, humanNudge, leaks, unanswered, ticketSweep, ticketChanges, reviewFollowups, amountChase, staleAppts, upcoming });
+      return json(200, { ...fu, resume, humanNudge, leaks, unanswered, ticketSweep, ticketChanges, reviewFollowups, amountChase, staleAppts, upcoming, unassigned });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       await heartbeat("fadc_followups", false, msg);
